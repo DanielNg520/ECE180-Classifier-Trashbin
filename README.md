@@ -78,6 +78,8 @@ and it resumes from the last epoch (including EMA state), skipping completed mod
 ```
 .
 ├── ECE180_Complete_Notebook.ipynb   # Full pipeline: download → train → eval → export
+├── deploy/                          # UNO Q runtime: inference, confidence threshold,
+│                                    #   webapp clarification client, EI upload reference
 ├── results/                         # test_results.json, domain_shift.json, confusion_matrix.png
 └── README.md
 ```
@@ -106,3 +108,43 @@ MyDrive/ECE180_project/
   quantization ranges match the live camera domain.
 - MobileNetV3-Small (~2.5M params) runs comfortably on the quad Cortex-A53; the
   export cell prints a CPU latency proxy (the A53 is ~2–4× slower than Colab CPU).
+
+## Confidence-Gated Clarification Loop
+
+Every classification carries a softmax confidence score. Below
+`CONFIDENCE_THRESHOLD` (default **0.60**), the device asks a human instead of
+guessing, and that correction feeds back into the shared model:
+
+```
+UNO Q (deploy/infer_uno_q.py)
+  classify frame -> (label, confidence)
+  confidence < 0.60?
+     -> deploy/clarification_client.py: POST frame + top-k to webapp,
+        queue locally if offline (retried via flush_pending())
+                    |
+                    v
+Webapp (separate repo/service) — notifies a human, they pick the right label,
+webapp persists the correction
+                    |
+                    v
+deploy/edge_impulse_upload.py — webapp backend calls this (or ports the
+pattern into its own stack) to push the corrected {image, label} into the
+shared Edge Impulse project's training data
+                    |
+                    v
+Next retrain/export cycle -> updated .tflite -> redeployed to every bin
+```
+
+`deploy/` implements the device side end-to-end (TFLite inference matching
+`eval_tf` preprocessing, thresholding, webhook client). The webapp and the
+Edge Impulse-triggered retrain/redeploy job are out of this repo's scope —
+`deploy/clarification_client.py`'s module docstring is the API contract the
+webapp must implement (`POST /api/clarifications`), and
+`deploy/edge_impulse_upload.py` is a reference the webapp backend can call
+once a human confirms a label.
+
+**Threshold calibration note:** 60% is a starting point, not a measured
+number. Raw softmax confidence from a label-smoothed model isn't a calibrated
+probability — before locking the threshold in, run it against `val_df`/`test_df`
+(precision/recall of "was top-1 actually correct" vs. confidence) and adjust
+per exported variant (int8 quantization adds logit noise vs. fp32).
