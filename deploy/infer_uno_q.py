@@ -27,7 +27,15 @@ RESIZE_SIZE = round(IMG_SIZE * 256 / 224)  # 293, matches Cell 5's eval_tf ratio
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
+# Both values come from the training notebook's calibration artifacts:
+#   TEMPERATURE          — export/confidence_calibration.json (Cell 12b)
+#   CONFIDENCE_THRESHOLD — export/quantization_report.json, the
+#                          `recommended_threshold` of the .tflite variant you
+#                          actually deployed (int8 shifts logits, so the
+#                          threshold is per-variant, not one global number).
+# Defaults are a safe fallback if the env isn't configured.
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.60"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.0"))
 
 
 def load_labels(labels_path):
@@ -93,7 +101,10 @@ class WasteClassifier:
         predictions: list of (class_name, confidence) sorted descending, len topk.
         """
         arr = preprocess(pil_image)
-        probs = self._softmax(self._run(arr))
+        # Temperature scaling (Cell 12b): argmax is unchanged, but confidence
+        # becomes an approximately calibrated P(correct), which is what the
+        # clarification threshold was tuned against.
+        probs = self._softmax(self._run(arr) / TEMPERATURE)
         top_idx = np.argsort(probs)[::-1][:topk]
         predictions = [(self.labels[i], float(probs[i])) for i in top_idx]
         needs_clarification = predictions[0][1] < CONFIDENCE_THRESHOLD

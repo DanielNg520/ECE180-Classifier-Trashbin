@@ -31,7 +31,7 @@ accuracy**, so the deployment choice is data-driven.
 
 ## Approach
 
-- **Model:** **MobileNetV3-Small** (deployment target), ImageNet-pretrained, fine-tuned at **256×256** with a fresh 30-way head. EfficientNet-B0 is available as an optional accuracy reference but is **off by default** to save compute.
+- **Model:** a single deployment target — **MobileNetV3-Large** (ImageNet-pretrained `IMAGENET1K_V2` weights), fine-tuned at **256×256** with a fresh 30-way head. There is no separate "reference" backbone: Large is the best accuracy/latency point that still runs int8 on the UNO Q, so it's the only model trained and shipped. (MobileNetV3-Small stays wired into `make_model` as a lighter fallback if the on-device latency proxy comes back too slow.)
 - **Split:** stratified 70/15/15 by (class, subset) so `real_world` images are proportionally represented in val/test — reported metrics reflect what the trashbin camera actually sees.
 - **Training:** two-stage fine-tune (head-only warmup → full fine-tune), AdamW + cosine schedule, label smoothing 0.1, mixed-precision (AMP), early stopping on val accuracy.
 - **Accuracy techniques** (all training-time only — the exported model is a single plain network):
@@ -40,6 +40,7 @@ accuracy**, so the deployment choice is data-driven.
   - **Class-balanced sampling** across the 30 classes (helps macro-F1)
 - **Augmentation:** camera-realistic — exposure/color jitter, Gaussian blur, random resized crop, random erasing — to close the studio→live-camera gap.
 - **Evaluation:** test accuracy, macro-F1, 30×30 confusion matrix, and a **domain-shift check** reporting `default` vs. `real_world` accuracy separately.
+- **Confidence calibration (Cell 12b):** temperature scaling fitted on val + a threshold sweep, so the clarification-loop threshold is a measured number, re-measured per exported int8/fp32 variant.
 - **Export:** PyTorch → ONNX + three TFLite variants (fp32, dynamic-int8, static/per-channel int8), each with **measured on-test accuracy vs. the fp32 baseline**, plus `labels.txt` and a reference `classify_frame()` entry point for the RTOS→Linux handoff.
 
 ---
@@ -47,14 +48,14 @@ accuracy**, so the deployment choice is data-driven.
 ## Training Setup
 
 Designed for **Google Colab** on a **T4 GPU runtime** (most compute-unit-efficient
-for a model this size — a full run is roughly **2–3 compute units**).
+for a model this size — a full run of MobileNetV3-Large is roughly **4–6 compute units**).
 
 | Setting | Value |
 |---------|-------|
-| GPU | T4 (batch 64, 2 workers) |
+| GPU | T4 (batch 48, 2 workers) |
 | Resolution | 256×256 |
-| Schedule | Stage 1: 3 epochs head-only · Stage 2: up to 22 epochs full fine-tune |
-| Early stop | patience 5 (typically ends stage 2 around epoch 12–18) |
+| Schedule | Stage 1: 3 epochs head-only · Stage 2: up to 30 epochs full fine-tune |
+| Early stop | patience 6 (typically ends stage 2 around epoch 16–24) |
 | Optimizer | AdamW, cosine LR, weight decay 1e-4, label smoothing 0.1 |
 
 Cell 9 prints a **live compute-unit meter** (auto-detects the GPU and its Colab
@@ -91,7 +92,10 @@ MyDrive/ECE180_project/
 ├── WasteDataset/      # 30 class dirs × {default, real_world}
 ├── checkpoints/       # *_best.pt, *_resume.pt, progress.json
 ├── results/           # metrics JSON + plots
-└── export/            # ONNX / TFLite models + labels.txt + quantization_report.json
+└── export/            # ONNX / TFLite models + labels.txt
+                       #   + quantization_report.json (per-variant acc, latency,
+                       #     recommended confidence threshold)
+                       #   + confidence_calibration.json (temperature + sweep)
 ```
 
 ## Deployment Notes (UNO Q)
@@ -106,19 +110,21 @@ MyDrive/ECE180_project/
   int8 accuracy is unacceptable.
 - The static-int8 model is calibrated on `real_world` training images so its
   quantization ranges match the live camera domain.
-- MobileNetV3-Small (~2.5M params) runs comfortably on the quad Cortex-A53; the
+- MobileNetV3-Large (~5.4M params) runs comfortably on the quad Cortex-A53 for a
+  non-real-time per-drop workload; the
   export cell prints a CPU latency proxy (the A53 is ~2–4× slower than Colab CPU).
 
 ## Confidence-Gated Clarification Loop
 
-Every classification carries a softmax confidence score. Below
-`CONFIDENCE_THRESHOLD` (default **0.60**), the device asks a human instead of
-guessing, and that correction feeds back into the shared model:
+Every classification carries a **temperature-scaled** softmax confidence score.
+Below `CONFIDENCE_THRESHOLD` (calibrated in the notebook; env-configured on the
+device, fallback 0.60), the device asks a human instead of guessing, and that
+correction feeds back into the shared model:
 
 ```
 UNO Q (deploy/infer_uno_q.py)
   classify frame -> (label, confidence)
-  confidence < 0.60?
+  confidence < CONFIDENCE_THRESHOLD?
      -> deploy/clarification_client.py: POST frame + top-k to webapp,
         queue locally if offline (retried via flush_pending())
                     |
@@ -143,8 +149,15 @@ webapp must implement (`POST /api/clarifications`), and
 `deploy/edge_impulse_upload.py` is a reference the webapp backend can call
 once a human confirms a label.
 
-**Threshold calibration note:** 60% is a starting point, not a measured
-number. Raw softmax confidence from a label-smoothed model isn't a calibrated
-probability — before locking the threshold in, run it against `val_df`/`test_df`
-(precision/recall of "was top-1 actually correct" vs. confidence) and adjust
-per exported variant (int8 quantization adds logit noise vs. fp32).
+**Threshold calibration (measured, not guessed):** raw softmax from a
+label-smoothed model isn't a calibrated probability, so the notebook calibrates
+it. **Cell 12b** fits temperature scaling on the val set (argmax unchanged;
+confidence becomes ≈ P(correct)), sweeps thresholds, and saves
+`export/confidence_calibration.json`. **Cell 13** then re-measures the
+recommended threshold **per TFLite variant** (int8 shifts logits) into
+`quantization_report.json`. On the device, set both env vars for the variant
+you ship — `TEMPERATURE` and `CONFIDENCE_THRESHOLD` — which
+`deploy/infer_uno_q.py` reads; the defaults (T=1.0, 0.60) are only a fallback.
+The selection rule is: lowest threshold whose auto-accepted predictions are
+≥95% correct, which maximizes coverage (fewest human clarifications) at that
+accuracy floor.
