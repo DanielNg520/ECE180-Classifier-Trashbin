@@ -4,3 +4,4 @@ __pycache__/
 *.onnx
 *.tflite
 .kaggle/
+*.onnx.data
