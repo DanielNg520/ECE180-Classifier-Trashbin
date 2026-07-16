@@ -67,7 +67,7 @@ billing rate) so you can watch cost accrue per epoch.
 
 1. Set the runtime to **T4 GPU** (Runtime → Change runtime type).
 2. Add Colab Secrets (🔑 sidebar), each with notebook access: `GITHUB_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY`.
-3. Run `ECE180_Complete_Notebook.ipynb` top to bottom. **Run the export cell (Cell 13) last** — `ai-edge-torch` pins torch versions and its install can disturb the training environment.
+3. Run `ECE180_Complete_Notebook.ipynb` top to bottom. **Run the export cell (Cell 13) last** — `litert-torch` pins torch versions and its install can disturb the training environment.
 
 The dataset downloads once via kagglehub into Google Drive
 (`MyDrive/ECE180_project/`); checkpoints and results persist there too.
