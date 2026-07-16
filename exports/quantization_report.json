@@ -1,0 +1,32 @@
+{
+  "pytorch_fp32_ref": 0.8907894736842106,
+  "temperature": 0.550000011920929,
+  "target_accept_acc": 0.95,
+  "fp32": {
+    "test_acc": 0.8907894736842106,
+    "size_mb": 17.07488,
+    "ms_frame_colab_cpu": 24.57327926368044,
+    "n": 2280,
+    "recommended_threshold": 0.75,
+    "coverage_at_threshold": 0.8552631578947368,
+    "accept_acc_at_threshold": 0.9502564102564103
+  },
+  "dynamic_int8": {
+    "test_acc": 0.8736842105263158,
+    "size_mb": 4.633456,
+    "ms_frame_colab_cpu": 75.88974488408942,
+    "n": 2280,
+    "recommended_threshold": 0.55,
+    "coverage_at_threshold": 0.7978070175438596,
+    "accept_acc_at_threshold": 0.9538207806487081
+  },
+  "static_int8": {
+    "test_acc": 0.8635964912280701,
+    "size_mb": 4.86624,
+    "ms_frame_colab_cpu": 35.76675695285463,
+    "n": 2280,
+    "recommended_threshold": 0.8,
+    "coverage_at_threshold": 0.7925438596491228,
+    "accept_acc_at_threshold": 0.9501936912008855
+  }
+}

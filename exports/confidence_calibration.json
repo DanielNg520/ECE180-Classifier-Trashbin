@@ -1,0 +1,81 @@
+{
+  "model": "mobilenet_v3_large",
+  "temperature": 0.550000011920929,
+  "target_accept_acc": 0.95,
+  "recommended_threshold": 0.8,
+  "test_coverage": 0.8328947368421052,
+  "test_accept_acc": 0.9568193786203265,
+  "val_sweep": [
+    {
+      "threshold": 0.3,
+      "coverage": 0.9916666666666667,
+      "accept_acc": 0.8783724015922159
+    },
+    {
+      "threshold": 0.35,
+      "coverage": 0.9855263157894737,
+      "accept_acc": 0.8820649755229194
+    },
+    {
+      "threshold": 0.4,
+      "coverage": 0.9776315789473684,
+      "accept_acc": 0.8882907133243607
+    },
+    {
+      "threshold": 0.45,
+      "coverage": 0.9671052631578947,
+      "accept_acc": 0.8934240362811792
+    },
+    {
+      "threshold": 0.5,
+      "coverage": 0.9539473684210527,
+      "accept_acc": 0.8997701149425288
+    },
+    {
+      "threshold": 0.55,
+      "coverage": 0.9289473684210526,
+      "accept_acc": 0.9084041548630784
+    },
+    {
+      "threshold": 0.6,
+      "coverage": 0.9114035087719298,
+      "accept_acc": 0.9157844080846969
+    },
+    {
+      "threshold": 0.65,
+      "coverage": 0.8850877192982456,
+      "accept_acc": 0.9236868186323092
+    },
+    {
+      "threshold": 0.7,
+      "coverage": 0.8583333333333333,
+      "accept_acc": 0.9294839039345938
+    },
+    {
+      "threshold": 0.75,
+      "coverage": 0.8280701754385965,
+      "accept_acc": 0.9433262711864406
+    },
+    {
+      "threshold": 0.8,
+      "coverage": 0.7890350877192982,
+      "accept_acc": 0.9549749861033908
+    },
+    {
+      "threshold": 0.85,
+      "coverage": 0.7552631578947369,
+      "accept_acc": 0.962253193960511
+    },
+    {
+      "threshold": 0.9,
+      "coverage": 0.7109649122807018,
+      "accept_acc": 0.972239358420728
+    },
+    {
+      "threshold": 0.95,
+      "coverage": 0.6289473684210526,
+      "accept_acc": 0.9797768479776848
+    }
+  ],
+  "note": "fp32 PyTorch numbers. Cell 13 re-measures per TFLite variant \u2014 use the variant-specific threshold from quantization_report.json for the variant you actually ship."
+}
