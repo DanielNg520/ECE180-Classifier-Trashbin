@@ -5,3 +5,5 @@ __pycache__/
 *.tflite
 .kaggle/
 *.onnx.data
+*.md
+!README.md

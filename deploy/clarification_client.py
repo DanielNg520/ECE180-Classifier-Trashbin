@@ -32,7 +32,10 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "http://localhost:8000")
 CLARIFICATION_ENDPOINT = f"{WEBAPP_URL.rstrip('/')}/api/clarifications"
 REQUEST_TIMEOUT_S = float(os.environ.get("CLARIFICATION_TIMEOUT_S", "5"))
 
-PENDING_DIR = os.environ.get("CLARIFICATION_QUEUE_DIR", "/var/lib/trashbin/pending_clarifications")
+PENDING_DIR = os.environ.get(
+    "CLARIFICATION_QUEUE_DIR",
+    os.path.expanduser("~/.local/state/trashbin/pending_clarifications"),
+)
 
 
 def _post(image_bytes, predictions, device_id, model_version, timestamp):
