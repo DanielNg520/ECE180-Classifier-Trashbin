@@ -1,4 +1,10 @@
 /*
+ * DEPRECATED — superseded by deploy/motor_app/ (Arduino App Lab app).
+ * On the UNO Q the STM32 is only reachable over the RouterBridge from inside an
+ * App container, not as a serial tty, so this standalone Serial-based sketch is
+ * not what runs. See deploy/motor_app/sketch/sketch.ino (Bridge.provide) and
+ * deploy/motor_app/python/main.py. Kept for reference only.
+ *
  * motor_control.ino — MCU side of the ECE180 trashbin sorter (Arduino Uno Q).
  *
  * Runs on the microcontroller. The Linux side classifies an item and sends a

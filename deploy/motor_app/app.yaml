@@ -1,0 +1,14 @@
+# app.yaml: Arduino App Lab configuration for the trashbin motor controller.
+
+# The user-visible name of the application.
+name: Trashbin Motor
+
+# The icon for the application, can be an emoji or a short string.
+icon: 🗑️
+
+# Publish the motor command port to the host so the host-side classifier
+# (deploy/camera_loop.py under cron) can POST target bins to it.
+ports: [8071]
+
+# No framework bricks needed — we talk to the MCU directly over the Bridge.
+bricks: []

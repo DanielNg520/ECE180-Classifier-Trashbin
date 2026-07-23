@@ -1,9 +1,11 @@
 # ECE180 Smart Trashbin — Recyclable & Household Waste Classification
 
 Transfer-learning image classifier for a smart trashbin built on the **Arduino UNO Q**.
-Inference runs on the UNO Q's Qualcomm Dragonwing Linux MPU; an RTOS on the
-companion STM32 MCU handles camera capture and real-time bin control, handing
-frames to the Linux side for classification.
+Inference and the camera loop run on the UNO Q's Qualcomm Dragonwing Linux MPU;
+the companion STM32 MCU drives the sorting hardware (NEMA-17 stepper, optional
+servo arm), reached from Linux over the Arduino **RouterBridge** RPC. The board
+is **plug-and-play**: on power-up it auto-starts both the classifier and the
+motor controller with no manual steps (see [On-Device Deployment](#on-device-deployment-uno-q--plug-and-play)).
 
 **Course:** ECE 180, UC San Diego
 **Dataset:** [Recyclable and Household Waste Classification](https://www.kaggle.com/datasets/alistairking/recyclable-and-household-waste-classification) (30 classes, ~15k images; each class has `default` studio and `real_world` cluttered subsets)
@@ -17,7 +19,7 @@ frames to the Linux side for classification.
 | SoC | **Qualcomm Dragonwing QRB2210** |
 | Inference compute | Quad-core **Cortex-A53** CPU + **Adreno 702** GPU |
 | OS | Debian Linux (on the MPU side) |
-| Real-time control | STM32 MCU running an RTOS (camera + actuation) |
+| Real-time control | STM32U585 MCU (Zephyr), drives the stepper/servo; reached over RouterBridge |
 
 The model runs on the Linux side. Two viable TFLite runtimes on this SoC:
 
@@ -79,8 +81,22 @@ and it resumes from the last epoch (including EMA state), skipping completed mod
 ```
 .
 ├── ECE180_Complete_Notebook.ipynb   # Full pipeline: download → train → eval → export
-├── deploy/                          # UNO Q runtime: inference, confidence threshold,
-│                                    #   webapp clarification client, EI upload reference
+├── deploy/                          # UNO Q runtime (see On-Device Deployment below)
+│   ├── camera_loop.py               #   host: camera capture + classify + report + sort trigger
+│   ├── infer_uno_q.py               #   host: TFLite inference matching eval_tf preprocessing
+│   ├── bin_map.py                   #   host: label → bin index
+│   ├── motor_bridge.py              #   host: POSTs target bin to the motor App (:8071)
+│   ├── clarification_client.py      #   host: low-confidence → webapp clarification queue
+│   ├── edge_impulse_upload.py       #   reference: push corrected {image,label} to Edge Impulse
+│   ├── motor_app/                   #   Arduino App Lab app that owns the MCU (motors)
+│   │   ├── app.yaml                 #     app manifest (publishes command port 8071)
+│   │   ├── sketch/sketch.ino        #     MCU: stepper control, Bridge.provide("sort", …)
+│   │   └── python/main.py           #     App: HTTP :8071 → Bridge.call("sort", bin)
+│   ├── run_trashbin.sh              #   boot: classifier self-restart loop (@reboot cron)
+│   ├── start_motor_app.sh           #   boot: waits for daemon, starts the motor App (@reboot cron)
+│   └── motor_control.ino            #   DEPRECATED standalone sketch (superseded by motor_app/)
+├── webapp/                          # dashboard/clarification service (deployed to the droplet)
+├── ESP32_mornitoring_camera/        # optional monitoring camera firmware (separate ESP32-S3 board)
 ├── results/                         # test_results.json, domain_shift.json, confusion_matrix.png
 └── README.md
 ```
@@ -97,6 +113,64 @@ MyDrive/ECE180_project/
                        #     recommended confidence threshold)
                        #   + confidence_calibration.json (temperature + sweep)
 ```
+
+## On-Device Deployment (UNO Q — plug-and-play)
+
+The runtime is split across the UNO Q's two processors, wired so the board comes
+up fully autonomous on power — no cable, no manual start.
+
+```
+                Linux MPU (Debian)                         STM32 MCU (Zephyr)
+  ┌──────────────────────────────────────────┐        ┌───────────────────────┐
+  │ camera_loop.py  (cron @reboot, self-loop) │        │ motor_app sketch.ino  │
+  │   USB webcam → classify → report dashboard│        │   Bridge.provide(     │
+  │   → motor_bridge.send_sort(bin)           │        │     "sort", …)        │
+  │        │  HTTP POST :8071/sort            │        │   stepper 9/10/8      │
+  │        ▼                                  │        └──────────▲────────────┘
+  │ motor_app python/main.py  (App Lab app)   │  RouterBridge RPC │
+  │   HTTP :8071 → Bridge.call("sort", bin) ──┼──(/run/arduino-router.sock)──┘
+  └──────────────────────────────────────────┘
+```
+
+**Why an App for the motors.** On the UNO Q the STM32 is *not* a serial tty — it
+is reachable only over the Arduino **RouterBridge** (RPC across an internal
+link), and that bridge is only exposed inside an **Arduino App Lab** app. So
+motor control lives in `deploy/motor_app/` (installed on the board as
+`~/ArduinoApps/nema17`, display name *"Trashbin Motor"*). `arduino-app-cli app
+start` compiles + flashes `sketch.ino` to the MCU and runs `python/main.py` in a
+container; the app publishes an HTTP command port (`8071`) to the host.
+
+**Rotation logic.** `sort(bin)` rotates the pole to the bin by the **shorter
+direction** (clockwise or counter-clockwise); on an exact tie it goes
+**clockwise**. The call blocks until the move finishes and returns the bin, so
+the HTTP response doubles as the motion ack.
+
+**Autostart (no root).** Installing a systemd service needs a sudo password, so
+plug-and-play is instead two `@reboot` entries in the `arduino` user's crontab:
+
+| Boot script | Role |
+|-------------|------|
+| `start_motor_app.sh` | waits for docker + the App Lab daemon, then `app start` the motor App |
+| `run_trashbin.sh`    | runs `camera_loop.py` in a self-restarting loop (relaunches on crash) |
+
+The classifier runs with `MOTOR_ENABLED=1` and `MOTOR_URL=http://127.0.0.1:8071`;
+if the motor App is down, sort calls are best-effort and never crash the loop.
+
+**Calibration knobs** (top of `deploy/motor_app/sketch/sketch.ino`): the stepper
+is on pins **PUL=9 / DIR=10 / ENA=8** at **200 steps/rev** (full-step → 50
+steps/bin, 4 bins). If the pole turns the wrong way, swap the `CW`/`CCW`
+constants; if it over/under-shoots a bin, the driver is microstepping — scale
+`STEPS_PER_REV`. The servo arm and homing switch are left **off** until wired
+(`SERVO_ENABLED` / `HOMING_ENABLED`). After any change:
+`arduino-app-cli app restart ~/ArduinoApps/nema17`.
+
+> **Python environment note:** the board's system Python is externally managed
+> with no venv (the `python3.13-venv` apt package needs a password). The host
+> classifier's deps (`ai-edge-litert`, `opencv-python-headless`, `numpy`,
+> `pillow`, `requests`) are installed to the **user site**
+> (`pip install --user --break-system-packages`), which is why `run_trashbin.sh`
+> uses `/usr/bin/python3` with `PYTHONPATH` pointed at `~/.local`. The motor App
+> gets its own environment from the App Lab runtime.
 
 ## Deployment Notes (UNO Q)
 
