@@ -24,7 +24,7 @@ from PIL import Image
 
 from infer_uno_q import WasteClassifier, classify_frame, CONFIDENCE_THRESHOLD
 from bin_map import label_to_bin, BIN_NAMES
-from motor_bridge import send_sort
+from motor_bridge import send_sort, _log as motor_log
 
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
 DEVICE_ID = os.environ.get("DEVICE_ID", "uno-q-dev")
@@ -129,7 +129,18 @@ def classify_and_report(clf, frame_bgr):
     if not flagged:
         target_bin = label_to_bin(top_cls)
         print(f"        -> bin {target_bin} ({BIN_NAMES[target_bin]})")
+        motor_log(
+            f"ACTUATE {top_cls} {top_conf * 100:.1f}% -> bin {target_bin} "
+            f"({BIN_NAMES[target_bin]})"
+        )
         send_sort(target_bin)
+    else:
+        # Below CONFIDENCE_THRESHOLD -> clarification queue, motor intentionally
+        # not driven. Logged so a silent motor isn't mistaken for a fault.
+        motor_log(
+            f"NO ACTUATE {top_cls} {top_conf * 100:.1f}% "
+            f"< threshold {CONFIDENCE_THRESHOLD:.0%} (clarification queued)"
+        )
 
 
 def interval_loop(cap, clf):

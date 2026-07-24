@@ -10,8 +10,10 @@
  * counter-clockwise); on a tie we go CLOCKWISE. The call blocks until the move
  * finishes and returns the bin we landed on (or -1 for a bad bin).
  *
- * Stepper wiring (bench-confirmed from the old `nema17` test sketch):
- *   PUL_PIN=9, DIR_PIN=10, ENA_PIN=8  -> TB6600-class driver (ENA active-LOW).
+ * Stepper wiring (from the known-good motor_control.ino bench setup — the
+ * driver is a TB6600-class, common-anode / active-LOW board):
+ *   PUL- = pin 2, DIR- = pin 3, ENA- = pin 4   (PUL+/DIR+/ENA+ tied to +5V).
+ *   Driver DIP set to 1/8 microstep => 1600 pulses/rev.
  * Servo arm + homing switch are left OFF here because their wiring isn't
  * confirmed yet — flip SERVO_ENABLED / HOMING_ENABLED once they're wired.
  */
@@ -21,27 +23,31 @@
 // left out to keep the App Lab build self-contained. When you wire the servo,
 // add `#include <Servo.h>`, restore the Servo object, and set SERVO_ENABLED.
 
-// ---- Stepper pins (confirmed working on the bench) ----
-const int PUL_PIN = 9;
-const int DIR_PIN = 10;
-const int ENA_PIN = 8;
-const int ENA_ACTIVE = LOW;   // TB6600: LOW = driver enabled / holding torque
+// ---- Stepper pins (match the physical wiring: PUL/DIR/ENA = 2/3/4) ----
+const int PUL_PIN = 2;
+const int DIR_PIN = 3;
+const int ENA_PIN = 4;
+const int ENA_ACTIVE = LOW;   // common-anode: LOW = driver enabled / holding torque
+
+// Signals are active-LOW (common-anode wiring): a pulse asserts LOW then
+// releases HIGH, matching the known-good motor_control.ino.
+const int PUL_ASSERT  = LOW;
+const int PUL_RELEASE = HIGH;
 
 // ---- Optional peripherals (enable once physically wired) ----
 const bool SERVO_ENABLED  = false;
-const int  SERVO_PIN      = 3;
+const int  SERVO_PIN      = 9;   // clear of the stepper pins 2/3/4
 const bool HOMING_ENABLED = false;
-const int  HOME_PIN       = 2;   // limit switch to GND, INPUT_PULLUP
+const int  HOME_PIN       = 5;   // limit switch to GND, INPUT_PULLUP
 
 // ---- Geometry ----
-// The old nema17 bench test spun exactly 200 pulses per full revolution
-// (driver in full-step mode). Four bins around the circle => 90 deg each.
-// If you switch the driver DIP to microstepping, scale STEPS_PER_REV by the
-// microstep factor (e.g. 1/8 microstep => 1600) and STEPS_PER_BIN follows.
+// The driver DIP is set to 1/8 microstep => 1600 pulses per full revolution
+// (see motor_control.ino). Four bins around the circle => 90 deg / 400 pulses
+// each. If you change the DIP microstep setting, rescale STEPS_PER_REV.
 const int  NUM_BINS       = 4;
-const long STEPS_PER_REV  = 200;
-const long STEPS_PER_BIN  = STEPS_PER_REV / NUM_BINS;   // 50 in full-step
-const int  PULSE_US       = 1000;                        // matches bench timing
+const long STEPS_PER_REV  = 1600;
+const long STEPS_PER_BIN  = STEPS_PER_REV / NUM_BINS;   // 400 at 1/8 microstep
+const int  PULSE_US       = 800;                         // matches bench timing
 
 // Direction levels on DIR_PIN. If the pole turns the WRONG way physically,
 // just swap these two values (one-line fix, no other logic changes).
@@ -63,9 +69,9 @@ const long HOME_MAX_STEPS = STEPS_PER_REV * 2;  // give up after 2 revs
 long currentBin = 0;   // where the pole is now (0..NUM_BINS-1)
 
 void stepPulse() {
-  digitalWrite(PUL_PIN, HIGH);
+  digitalWrite(PUL_PIN, PUL_ASSERT);
   delayMicroseconds(PULSE_US);
-  digitalWrite(PUL_PIN, LOW);
+  digitalWrite(PUL_PIN, PUL_RELEASE);
   delayMicroseconds(PULSE_US);
 }
 
