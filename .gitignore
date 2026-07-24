@@ -8,3 +8,11 @@ __pycache__/
 *.md
 !README.md
 webapp/server.py
+
+# Bin-ary Sort web dashboard runtime files
+webapp/.venv/
+webapp/__pycache__/
+webapp/*.db
+webapp/clarification_images/
+webapp/server_backup.py
+webapp/server_before_v2.py
