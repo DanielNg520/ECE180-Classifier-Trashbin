@@ -125,7 +125,7 @@ up fully autonomous on power — no cable, no manual start.
   │ camera_loop.py  (cron @reboot, self-loop) │        │ motor_app sketch.ino  │
   │   USB webcam → classify → report dashboard│        │   Bridge.provide(     │
   │   → motor_bridge.send_sort(bin)           │        │     "sort", …)        │
-  │        │  HTTP POST :8071/sort            │        │   stepper 9/10/8      │
+  │        │  HTTP POST :8071/sort            │        │   stepper 2/3/4       │
   │        ▼                                  │        └──────────▲────────────┘
   │ motor_app python/main.py  (App Lab app)   │  RouterBridge RPC │
   │   HTTP :8071 → Bridge.call("sort", bin) ──┼──(/run/arduino-router.sock)──┘
@@ -157,11 +157,14 @@ The classifier runs with `MOTOR_ENABLED=1` and `MOTOR_URL=http://127.0.0.1:8071`
 if the motor App is down, sort calls are best-effort and never crash the loop.
 
 **Calibration knobs** (top of `deploy/motor_app/sketch/sketch.ino`): the stepper
-is on pins **PUL=9 / DIR=10 / ENA=8** at **200 steps/rev** (full-step → 50
-steps/bin, 4 bins). If the pole turns the wrong way, swap the `CW`/`CCW`
-constants; if it over/under-shoots a bin, the driver is microstepping — scale
-`STEPS_PER_REV`. The servo arm and homing switch are left **off** until wired
-(`SERVO_ENABLED` / `HOMING_ENABLED`). After any change:
+is on pins **PUL=2 / DIR=3 / ENA=4** (common-anode, active-LOW) at **1600
+steps/rev** (1/8 microstep → 400 steps/bin, 4 bins). These must match the
+driver's physical wiring — if they don't, sort RPCs still ack (`landed=N`) but
+no pulses reach the driver and the pole never turns. If the pole turns the wrong
+way, swap the `CW`/`CCW` constants; if it over/under-shoots a bin, rescale
+`STEPS_PER_REV` to the driver's DIP microstep setting. The servo arm and homing
+switch are left **off** until wired (`SERVO_ENABLED` / `HOMING_ENABLED`). After
+any change:
 `arduino-app-cli app restart ~/ArduinoApps/nema17`.
 
 > **Python environment note:** the board's system Python is externally managed
