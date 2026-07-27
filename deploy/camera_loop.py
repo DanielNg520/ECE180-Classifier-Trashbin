@@ -26,6 +26,10 @@ from infer_uno_q import WasteClassifier, classify_frame, CONFIDENCE_THRESHOLD
 from bin_map import label_to_bin, BIN_NAMES
 from motor_bridge import send_sort, _log as motor_log
 
+# One pooled session for dashboard POSTs — keeps the TCP connection warm
+# instead of a fresh handshake per frame.
+_session = requests.Session()
+
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
 DEVICE_ID = os.environ.get("DEVICE_ID", "uno-q-dev")
 CAMERA_INDEX = os.environ.get("CAMERA_INDEX")  # unset = auto-detect
@@ -67,7 +71,7 @@ def report_event(predictions, needs_clarification, model_version, ms_frame):
     if not WEBAPP_URL:
         return
     try:
-        requests.post(
+        _session.post(
             f"{WEBAPP_URL}/api/events",
             json={
                 "device_id": DEVICE_ID,
@@ -114,6 +118,12 @@ def read_fresh(cap):
     return frame_bgr if ok else None
 
 
+def read_one(cap):
+    """Single cheap read — used while merely watching for motion."""
+    ok, frame_bgr = cap.read()
+    return frame_bgr if ok else None
+
+
 def classify_and_report(clf, frame_bgr):
     img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
     t0 = time.perf_counter()
@@ -156,8 +166,10 @@ def interval_loop(cap, clf):
 
 
 def _gray_small(frame_bgr):
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    return cv2.resize(gray, (160, 120)).astype("int16")
+    # Downscale first, then grayscale: the color conversion runs on ~16x fewer
+    # pixels (160x120 vs 640x480) for the same frame-diff score.
+    small = cv2.resize(frame_bgr, (160, 120))
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype("int16")
 
 
 def motion_loop(cap, clf, sample_s=0.2):
@@ -167,13 +179,15 @@ def motion_loop(cap, clf, sample_s=0.2):
     started; wait until SETTLE_QUIET_SAMPLES consecutive quiet samples, i.e.
     the item has come to rest) -> classify one frame -> COOLDOWN_S -> ARMED.
     Diffing a 160x120 grayscale frame costs ~1 ms, so idle CPU stays near zero.
+    While merely watching we do a single cheap read() per sample; the 3-frame
+    buffer drain (read_fresh) only matters at the moment we actually classify.
     """
     print(f"Motion-triggered (threshold {MOTION_THRESHOLD}) — Ctrl-C to stop.")
     prev = None
     settling = False
     quiet = 0
     while True:
-        frame = read_fresh(cap)
+        frame = read_one(cap)
         if frame is None:
             time.sleep(1)
             continue
@@ -187,7 +201,9 @@ def motion_loop(cap, clf, sample_s=0.2):
             else:
                 quiet = quiet + 1 if score <= MOTION_THRESHOLD else 0
                 if quiet >= SETTLE_QUIET_SAMPLES:
-                    classify_and_report(clf, frame)
+                    # Item at rest — grab a fresh (un-buffered) frame to classify.
+                    fresh = read_fresh(cap)
+                    classify_and_report(clf, fresh if fresh is not None else frame)
                     settling = False
                     time.sleep(COOLDOWN_S)
                     prev = None  # scene changed during cooldown; re-baseline

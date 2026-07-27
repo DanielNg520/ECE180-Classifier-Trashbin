@@ -18,7 +18,13 @@ from PIL import Image
 try:
     from ai_edge_litert.interpreter import Interpreter
 except ImportError:
-    from tensorflow.lite.python.interpreter import Interpreter
+    try:
+        from tensorflow.lite.python.interpreter import Interpreter
+    except ImportError:
+        # Neither runtime present (e.g. a dev machine running the unit tests).
+        # The module stays importable; WasteClassifier raises a clear error only
+        # if you actually try to instantiate it without a runtime.
+        Interpreter = None
 
 from clarification_client import request_clarification
 
@@ -43,9 +49,16 @@ def load_labels(labels_path):
         return [line.strip() for line in f if line.strip()]
 
 
-def preprocess(pil_image, img_size=IMG_SIZE, resize_size=RESIZE_SIZE):
-    """Matches torchvision's Resize(shorter_side) + CenterCrop(img_size) + Normalize."""
-    img = pil_image.convert("RGB")
+def _resize_crop(pil_image, img_size=IMG_SIZE, resize_size=RESIZE_SIZE):
+    """Resize shorter side to resize_size + center-crop img_size.
+
+    Returns an HWC uint8 RGB array. The PIL BILINEAR resize is the
+    accuracy-sensitive step that must match the notebook's `eval_tf`, so it
+    stays on PIL; everything after is plain numpy. The `.convert("RGB")` is
+    skipped when the frame is already RGB (the camera-loop path always is),
+    avoiding a redundant full-frame copy.
+    """
+    img = pil_image if pil_image.mode == "RGB" else pil_image.convert("RGB")
     w, h = img.size
     if w <= h:
         new_w, new_h = resize_size, round(h * resize_size / w)
@@ -55,8 +68,17 @@ def preprocess(pil_image, img_size=IMG_SIZE, resize_size=RESIZE_SIZE):
 
     left, top = (new_w - img_size) // 2, (new_h - img_size) // 2
     img = img.crop((left, top, left + img_size, top + img_size))
+    return np.asarray(img)  # HWC uint8, RGB
 
-    arr = np.asarray(img).astype(np.float32) / 255.0  # HWC, 0-1
+
+def preprocess(pil_image, img_size=IMG_SIZE, resize_size=RESIZE_SIZE):
+    """Float32 NCHW, ImageNet-normalized — the fp32 / dynamic-int8 input path.
+
+    Matches torchvision's Resize(shorter_side) + CenterCrop + Normalize.
+    (Static-int8 models take the fused uint8->int8 path in
+    WasteClassifier._prepare_input instead, which is numerically equivalent.)
+    """
+    arr = _resize_crop(pil_image, img_size, resize_size).astype(np.float32) / 255.0
     arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
     arr = arr.transpose(2, 0, 1)  # CHW
     return arr[np.newaxis, ...]  # NCHW float32
@@ -64,6 +86,11 @@ def preprocess(pil_image, img_size=IMG_SIZE, resize_size=RESIZE_SIZE):
 
 class WasteClassifier:
     def __init__(self, model_path, labels_path, num_threads=4):
+        if Interpreter is None:
+            raise RuntimeError(
+                "No TFLite runtime found — install `ai-edge-litert` (or tensorflow) "
+                "on the device. See README 'Python environment note'."
+            )
         self.labels = load_labels(labels_path)
         self.model_name = os.path.basename(model_path)
         self.interpreter = Interpreter(model_path=model_path, num_threads=num_threads)
@@ -71,16 +98,43 @@ class WasteClassifier:
         self.input_detail = self.interpreter.get_input_details()[0]
         self.output_detail = self.interpreter.get_output_details()[0]
 
+        # For a quantized (int8/uint8) input, fold the ImageNet normalization and
+        # the input quantization into a single per-channel affine, so a frame
+        # goes uint8 -> int8 in one multiply-add with no float32 intermediate.
+        #   normalized = (px/255 - mean) / std
+        #   q          = round(normalized / scale + zero_point)
+        #             = round(px * A + B)        with, per channel:
+        #   A = 1 / (255 * std * scale)
+        #   B = zero_point - mean / (std * scale)
+        # Numerically equivalent to the old normalize-then-quantize two-step.
+        self._quantized = self.input_detail["dtype"] in (np.int8, np.uint8)
+        if self._quantized:
+            scale, zero_point = self.input_detail["quantization"]
+            self._q_A = (1.0 / (255.0 * IMAGENET_STD * scale)).astype(np.float32)
+            self._q_B = (zero_point - IMAGENET_MEAN / (IMAGENET_STD * scale)).astype(np.float32)
+            self._q_info = np.iinfo(self.input_detail["dtype"])
+
+        print(
+            f"[infer] {self.model_name}: input dtype={np.dtype(self.input_detail['dtype']).name}, "
+            f"{'fused int8' if self._quantized else 'float'} path, {num_threads} threads",
+            flush=True,
+        )
+
+    def _prepare_input(self, pil_image):
+        """PIL frame -> model-ready NCHW tensor (fused int8 or normalized float)."""
+        hwc = _resize_crop(pil_image)  # HWC uint8 RGB
+        if self._quantized:
+            q = np.round(hwc.astype(np.float32) * self._q_A + self._q_B)
+            q = np.clip(q, self._q_info.min, self._q_info.max).astype(self.input_detail["dtype"])
+            arr = q.transpose(2, 0, 1)[np.newaxis, ...]
+        else:
+            f = hwc.astype(np.float32) / 255.0
+            f = (f - IMAGENET_MEAN) / IMAGENET_STD
+            arr = f.transpose(2, 0, 1)[np.newaxis, ...].astype(self.input_detail["dtype"])
+        return arr
+
     def _run(self, arr):
         inp, out = self.input_detail, self.output_detail
-        if inp["dtype"] in (np.int8, np.uint8):
-            scale, zero_point = inp["quantization"]
-            info = np.iinfo(inp["dtype"])
-            arr = np.clip(np.round(arr / scale + zero_point), info.min, info.max)
-            arr = arr.astype(inp["dtype"])
-        else:
-            arr = arr.astype(inp["dtype"])
-
         self.interpreter.set_tensor(inp["index"], arr)
         self.interpreter.invoke()
         logits = self.interpreter.get_tensor(out["index"])[0].astype(np.float32)
@@ -100,7 +154,7 @@ class WasteClassifier:
 
         predictions: list of (class_name, confidence) sorted descending, len topk.
         """
-        arr = preprocess(pil_image)
+        arr = self._prepare_input(pil_image)
         # Temperature scaling (Cell 12b): argmax is unchanged, but confidence
         # becomes an approximately calibrated P(correct), which is what the
         # clarification threshold was tuned against.

@@ -34,6 +34,10 @@ MOTOR_ENABLED = os.environ.get("MOTOR_ENABLED", "0") == "1"
 MOTOR_URL = os.environ.get("MOTOR_URL", "http://127.0.0.1:8071").rstrip("/")
 MOTOR_ACK_TIMEOUT = float(os.environ.get("MOTOR_ACK_TIMEOUT", "20"))
 
+# One pooled session so back-to-back sorts reuse the localhost connection to
+# the motor app instead of a fresh TCP handshake on the (blocking) ack path.
+_session = requests.Session()
+
 # Dedicated debug log for the motor path. The UNO Q has a single USB port, so
 # you can't be on adb AND have the camera plugged in at once — persist every
 # motor decision to a file, then reconnect adb later and read it. Set
@@ -56,24 +60,21 @@ def _log(msg):
         pass  # logging must never break the sort path
 
 
-def send_sort(bin_index, wait_ack=True):
+def send_sort(bin_index):
     """Tell the motor app to sort the current item into `bin_index` (0-3).
 
     Returns True if the app acknowledged the move. No-op returning False when
-    MOTOR_ENABLED is off or the motor app is unreachable/errored.
-
-    `wait_ack` is accepted for compatibility with the old serial bridge; the
-    HTTP request always blocks until the move completes, so it has no effect
-    beyond the (shorter) timeout used when a caller doesn't care about the ack.
+    MOTOR_ENABLED is off or the motor app is unreachable/errored. The HTTP
+    request always blocks until the move completes, so the response is the ack.
     """
     if not MOTOR_ENABLED:
         _log(f"SKIP bin={bin_index}: MOTOR_ENABLED is off (set MOTOR_ENABLED=1)")
         return False
-    timeout = MOTOR_ACK_TIMEOUT if wait_ack else 3
+    timeout = MOTOR_ACK_TIMEOUT
     _log(f"POST {MOTOR_URL}/sort bin={bin_index} (timeout={timeout}s)")
     t0 = time.perf_counter()
     try:
-        resp = requests.post(
+        resp = _session.post(
             f"{MOTOR_URL}/sort",
             json={"bin": int(bin_index)},
             timeout=timeout,

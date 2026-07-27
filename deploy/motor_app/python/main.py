@@ -76,8 +76,14 @@ def start_http_server():
     server.serve_forever()
 
 
-# Run the HTTP server in a background thread; App.run() keeps the app alive
-# (and keeps the Bridge serviced).
-threading.Thread(target=start_http_server, daemon=True).start()
+def main():
+    # Run the HTTP server in a background thread; App.run() keeps the app alive
+    # (and keeps the Bridge serviced). Guarded under __main__ so the handler
+    # logic can be imported (e.g. by unit tests) without binding the port or
+    # blocking in App.run(). App Lab launches this file as the main script.
+    threading.Thread(target=start_http_server, daemon=True).start()
+    App.run()
 
-App.run()
+
+if __name__ == "__main__":
+    main()

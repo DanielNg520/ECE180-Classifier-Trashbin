@@ -36,6 +36,12 @@ PENDING_DIR = os.environ.get(
     "CLARIFICATION_QUEUE_DIR",
     os.path.expanduser("~/.local/state/trashbin/pending_clarifications"),
 )
+# Cap the offline queue so a long webapp outage can't fill the board's small
+# eMMC. When full, the oldest pending clarifications are dropped first.
+MAX_PENDING = int(os.environ.get("CLARIFICATION_QUEUE_MAX", "500"))
+
+# Pooled session — reuses the connection across the report loop / flush retries.
+_session = requests.Session()
 
 
 def _post(image_bytes, predictions, device_id, model_version, timestamp):
@@ -48,10 +54,25 @@ def _post(image_bytes, predictions, device_id, model_version, timestamp):
             [{"class": c, "confidence": conf} for c, conf in predictions]
         ),
     }
-    resp = requests.post(
+    resp = _session.post(
         CLARIFICATION_ENDPOINT, files=files, data=data, timeout=REQUEST_TIMEOUT_S
     )
     resp.raise_for_status()
+
+
+def _prune_queue():
+    """Drop the oldest queued clarifications so the queue stays <= MAX_PENDING."""
+    if not os.path.isdir(PENDING_DIR):
+        return
+    metas = sorted(f for f in os.listdir(PENDING_DIR) if f.endswith(".json"))
+    excess = len(metas) - MAX_PENDING
+    for fname in metas[:max(excess, 0)]:
+        base = os.path.join(PENDING_DIR, fname[: -len(".json")])
+        for path in (base + ".json", base + ".jpg"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def _queue_locally(image_bytes, predictions, device_id, model_version, timestamp):
@@ -70,6 +91,7 @@ def _queue_locally(image_bytes, predictions, device_id, model_version, timestamp
             },
             f,
         )
+    _prune_queue()
 
 
 def request_clarification(pil_image, predictions, device_id, model_version):
