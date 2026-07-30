@@ -86,12 +86,14 @@ and it resumes from the last epoch (including EMA state), skipping completed mod
 │   ├── infer_uno_q.py               #   host: TFLite inference matching eval_tf preprocessing
 │   ├── bin_map.py                   #   host: label → bin index
 │   ├── motor_bridge.py              #   host: POSTs target bin to the motor App (:8071)
+│   ├── motor_cli.py                 #   laptop: manual motor control over ssh (standalone)
+│   ├── MOTOR_CONTROL_MAP.md         #   file map for the manual motor-control path
 │   ├── clarification_client.py      #   host: low-confidence → webapp clarification queue
 │   ├── edge_impulse_upload.py       #   reference: push corrected {image,label} to Edge Impulse
 │   ├── motor_app/                   #   Arduino App Lab app that owns the MCU (motors)
 │   │   ├── app.yaml                 #     app manifest (publishes command port 8071)
-│   │   ├── sketch/sketch.ino        #     MCU: stepper control, Bridge.provide("sort", …)
-│   │   └── python/main.py           #     App: HTTP :8071 → Bridge.call("sort", bin)
+│   │   ├── sketch/sketch.ino        #     MCU: stepper + servo, Bridge.provide("sort"/"step"/…)
+│   │   └── python/main.py           #     App: HTTP :8071 → Bridge.call(…)  (sort + manual)
 │   ├── run_trashbin.sh              #   boot: classifier self-restart loop (@reboot cron)
 │   ├── start_motor_app.sh           #   boot: waits for daemon, starts the motor App (@reboot cron)
 │   └── motor_control.ino            #   DEPRECATED standalone sketch (superseded by motor_app/)
@@ -166,6 +168,30 @@ way, swap the `CW`/`CCW` constants; if it over/under-shoots a bin, rescale
 switch are left **off** until wired (`SERVO_ENABLED` / `HOMING_ENABLED`). After
 any change:
 `arduino-app-cli app restart ~/ArduinoApps/nema17`.
+
+### Manual motor control over SSH
+
+`deploy/motor_cli.py` drives both motors by hand from a laptop — standalone (it
+imports nothing else in `deploy/`), it just `ssh`es to the board and `curl`s the
+motor App. Full details in [`deploy/MOTOR_CONTROL_MAP.md`](deploy/MOTOR_CONTROL_MAP.md).
+
+The big stepper is addressed by **absolute pulse position, 0–1600** (one full
+revolution at the 1/8 microstep setting; bins sit at 0 / 400 / 800 / 1200), and
+the servo arm by **absolute angle, 0–180**:
+
+```bash
+export MOTOR_SSH=arduino@uno-q.local   # or --ssh; add --port 2222 --jump root@<droplet> for the tunnel
+python3 deploy/motor_cli.py step 800   # stepper -> pulse 800 (half turn, == bin 2)
+python3 deploy/motor_cli.py nudge -25  # stepper -> 25 pulses counter-clockwise
+python3 deploy/motor_cli.py servo 160  # arm -> 160 degrees
+python3 deploy/motor_cli.py pos        # read position, move nothing
+python3 deploy/motor_cli.py repl       # interactive: a bare 0-1600 is a position
+```
+
+Moves take the shorter way round and block until the motor stops, so the printed
+result is the position the MCU actually reached. `servo` reports the peripheral
+as disabled until `SERVO_ENABLED` is flipped in the sketch. This shares the
+`:8071` App with the classifier, so the App must be running.
 
 > **Python environment note:** the board's system Python is externally managed
 > with no venv (the `python3.13-venv` apt package needs a password). The host
