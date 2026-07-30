@@ -1,266 +1,271 @@
-# ECE180 Smart Trashbin — Recyclable & Household Waste Classification
+# UCSD ECE 180 Team 12 Final Project: Bin-ary Sorter
 
-Transfer-learning image classifier for a smart trashbin built on the **Arduino UNO Q**.
-Inference and the camera loop run on the UNO Q's Qualcomm Dragonwing Linux MPU;
-the companion STM32 MCU drives the sorting hardware (NEMA-17 stepper, optional
-servo arm), reached from Linux over the Arduino **RouterBridge** RPC. The board
-is **plug-and-play**: on power-up it auto-starts both the classifier and the
-motor controller with no manual steps (see [On-Device Deployment](#on-device-deployment-uno-q--plug-and-play)).
+*Waste sorting with computer vision, on the Arduino UNO Q.*
 
-**Course:** ECE 180, UC San Diego
-**Dataset:** [Recyclable and Household Waste Classification](https://www.kaggle.com/datasets/alistairking/recyclable-and-household-waste-classification) (30 classes, ~15k images; each class has `default` studio and `real_world` cluttered subsets)
+## Team Members
 
----
+| Name | Major | Year |
+|------|-------|------|
+| Colin Hua | ECE — Electrical Engineering | 2027 |
+| Duy Nguyen | ECE — Computer Engineering | 2027 |
+| Aram Zarate Ubario | ECE — Computer Engineering | 2027 |
 
-## Target Hardware — Arduino UNO Q
+**Course:** ECE 180 — Prof. Silberman, UC San Diego, 2026
 
-| Component | Spec |
-|-----------|------|
-| SoC | **Qualcomm Dragonwing QRB2210** |
-| Inference compute | Quad-core **Cortex-A53** CPU + **Adreno 702** GPU |
-| OS | Debian Linux (on the MPU side) |
-| Real-time control | STM32U585 MCU (Zephyr), drives the stepper/servo; reached over RouterBridge |
+## Project Overview
 
-The model runs on the Linux side. Two viable TFLite runtimes on this SoC:
+Bin-ary Sorter is a self-contained smart trashbin that classifies an item the
+moment it is dropped in and rotates it into the correct one of four bins — no
+phone, no cloud call, no user input. A USB camera on the UNO Q captures the
+frame, a fine-tuned **MobileNetV3-Large** runs **entirely on-device** over the
+30-class Kaggle waste dataset, and the resulting label is collapsed to a bin
+index that a NEMA-17 stepper drives to. Inference and the camera loop live on
+the UNO Q's Qualcomm Dragonwing Linux MPU; the companion STM32 MCU owns the
+real-time motor control and is reached over the Arduino **RouterBridge** RPC.
+The board is plug-and-play: on power-up it auto-starts both the classifier and
+the motor controller with no manual steps.
 
-- **int8 on CPU via XNNPACK** — fastest, smallest, minor accuracy trade-off
-- **fp16 / fp32 on the Adreno GPU delegate** — near-zero accuracy loss
+When the model is *not* confident, the bin does not guess — it pushes the frame
+to a web dashboard and asks a human, and that correction feeds the next
+retrain.
 
-The notebook exports both int8 and float variants and **measures each one's real
-accuracy**, so the deployment choice is data-driven.
+## Goals
 
----
+### Original Objectives
+- Train a transfer-learning waste classifier accurate enough to run quantized on an edge MPU
+- Run inference fully on-device on the Arduino UNO Q (no cloud inference)
+- Drive a rotating-pole sorting mechanism from the classification result
+- Build a web dashboard showing live status and classification confidence
 
-## Approach
+### Achieved Goals
+- MobileNetV3-Large fine-tuned to **89.1% test accuracy / 0.890 macro-F1** across 30 classes
+- Exported to ONNX + three TFLite variants with **measured** per-variant accuracy, size, and latency
+- Full on-device pipeline: camera → classify → bin index → stepper move, autostarted at boot
+- **4-category sorting** through the rotating-pole chassis
+- Web dashboard with correct/wrong human feedback (reinforced-learning loop)
+- Second motor (servo arm) added to the mechanism late in the schedule
 
-- **Model:** a single deployment target — **MobileNetV3-Large** (ImageNet-pretrained `IMAGENET1K_V2` weights), fine-tuned at **256×256** with a fresh 30-way head. There is no separate "reference" backbone: Large is the best accuracy/latency point that still runs int8 on the UNO Q, so it's the only model trained and shipped. (MobileNetV3-Small stays wired into `make_model` as a lighter fallback if the on-device latency proxy comes back too slow.)
-- **Split:** stratified 70/15/15 by (class, subset) so `real_world` images are proportionally represented in val/test — reported metrics reflect what the trashbin camera actually sees.
-- **Training:** two-stage fine-tune (head-only warmup → full fine-tune), AdamW + cosine schedule, label smoothing 0.1, mixed-precision (AMP), early stopping on val accuracy.
-- **Accuracy techniques** (all training-time only — the exported model is a single plain network):
-  - **EMA** of weights — the averaged model is checkpointed and deployed
-  - **MixUp + CutMix** regularization
-  - **Class-balanced sampling** across the 30 classes (helps macro-F1)
-- **Augmentation:** camera-realistic — exposure/color jitter, Gaussian blur, random resized crop, random erasing — to close the studio→live-camera gap.
-- **Evaluation:** test accuracy, macro-F1, 30×30 confusion matrix, and a **domain-shift check** reporting `default` vs. `real_world` accuracy separately.
-- **Confidence calibration (Cell 12b):** temperature scaling fitted on val + a threshold sweep, so the clarification-loop threshold is a measured number, re-measured per exported int8/fp32 variant.
-- **Export:** PyTorch → ONNX + three TFLite variants (fp32, dynamic-int8, static/per-channel int8), each with **measured on-test accuracy vs. the fp32 baseline**, plus `labels.txt` and a reference `classify_frame()` entry point for the RTOS→Linux handoff.
+### Stretch Goals
+- ESP32-S3 monitoring camera stream — *in progress*
+- Federated learning across bins for a network effect — *in progress*
+- Higher-throughput continuous-feed sorting rather than one item at a time
 
----
+## System Hardware
 
-## Training Setup
+| Component | Purpose |
+|-----------|---------|
+| Arduino UNO Q (Qualcomm Dragonwing QRB2210) | Primary compute — quad Cortex-A53 + Adreno 702, Debian Linux |
+| STM32U585 MCU (Zephyr, on-board) | Real-time stepper/servo control, reached over RouterBridge RPC |
+| USB webcam | Item capture at the drop chute |
+| NEMA-17 stepper + driver | Rotates the sorting pole to the target bin |
+| Servo arm | Second-stage actuation (added late; `SERVO_ENABLED` gate) |
+| ESP32-S3 + camera | Optional monitoring stream (stretch) |
 
-Designed for **Google Colab** on a **T4 GPU runtime** (most compute-unit-efficient
-for a model this size — a full run of MobileNetV3-Large is roughly **4–6 compute units**).
+## Model & Dataset
 
-| Setting | Value |
-|---------|-------|
-| GPU | T4 (batch 48, 2 workers) |
-| Resolution | 256×256 |
-| Schedule | Stage 1: 3 epochs head-only · Stage 2: up to 30 epochs full fine-tune |
-| Early stop | patience 6 (typically ends stage 2 around epoch 16–24) |
-| Optimizer | AdamW, cosine LR, weight decay 1e-4, label smoothing 0.1 |
+**Dataset:** [Recyclable and Household Waste Classification](https://www.kaggle.com/datasets/alistairking/recyclable-and-household-waste-classification)
+— 30 classes, ~15k images, each class split into `default` (studio) and
+`real_world` (cluttered) subsets.
 
-Cell 9 prints a **live compute-unit meter** (auto-detects the GPU and its Colab
-billing rate) so you can watch cost accrue per epoch.
+The split is stratified 70/15/15 by *(class, subset)* so `real_world` images are
+proportionally represented in val and test — reported metrics reflect what the
+bin's camera actually sees, not a studio best case.
 
----
+| Metric | Value |
+|--------|-------|
+| Test accuracy (fp32) | **89.08%** |
+| Macro-F1 | **0.890** |
+| Parameters | 4.24 M |
+| `default` vs `real_world` accuracy | 89.2% vs 88.9% (no meaningful domain gap) |
 
-## Running
+Training is a two-stage fine-tune (head-only warmup → full fine-tune) with
+AdamW + cosine schedule, label smoothing 0.1, AMP, EMA weights, MixUp/CutMix,
+class-balanced sampling, and camera-realistic augmentation. All of it is
+training-time only — the exported model is a single plain network.
 
-1. Set the runtime to **T4 GPU** (Runtime → Change runtime type).
-2. Add Colab Secrets (🔑 sidebar), each with notebook access: `GITHUB_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY`.
-3. Run `ECE180_Complete_Notebook.ipynb` top to bottom. **Run the export cell (Cell 13) last** — `litert-torch` pins torch versions and its install can disturb the training environment.
+### Quantization results
 
-The dataset downloads once via kagglehub into Google Drive
-(`MyDrive/ECE180_project/`); checkpoints and results persist there too.
-Training is **multi-session safe** — if Colab disconnects, re-run the notebook
-and it resumes from the last epoch (including EMA state), skipping completed models.
+Every exported variant is re-scored on the real test set, so the deployment
+choice is data-driven rather than assumed:
 
-## Repo Structure
+| Variant | Test acc | Size | Recommended threshold |
+|---------|----------|------|-----------------------|
+| fp32 | 89.08% | 17.1 MB | 0.75 |
+| dynamic-int8 | 87.37% | 4.63 MB | 0.55 |
+| **static-int8 (shipped)** | **86.36%** | **4.87 MB** | **0.80** |
+
+**static-int8 is the variant deployed to the bin.** It gives up 2.7 points of
+accuracy against fp32 but is 3.5× smaller and the fastest of the three on the
+board, and its quantization ranges are calibrated on `real_world` training
+images so they match the live camera domain. The confidence gate absorbs the
+accuracy loss: at its measured threshold of 0.80 the auto-accepted predictions
+are still 95.0% correct, and the rest go to a human.
+
+### Measured on-device latency
+
+Benchmarked on the UNO Q itself (aarch64, quad Cortex-A53, TFLite XNNPACK CPU
+delegate, 256×256 int8 input, 50 timed invocations after warmup):
+
+| Threads | Median | Mean | Min – Max |
+|---------|--------|------|-----------|
+| 1 | 79.8 ms | 80.1 ms | 79.2 – 83.1 ms |
+| **4 (shipped)** | **26.5 ms** | **27.3 ms** | **26.0 – 35.1 ms** |
+
+`infer_uno_q.py` runs the interpreter with `num_threads=4`, so **~27 ms per
+frame** is the real per-item inference cost — far below the mechanical settling
+time of the stepper, which means classification is never the bottleneck in a
+drop cycle. Model inference only; camera capture and preprocessing are on top.
+The GPU delegate was never needed.
+
+## Mechanical Design
+
+Four bins arranged in a round casing around a **rotating pole**. The pole
+carries the item to the correct bin by the shorter direction (clockwise or
+counter-clockwise; an exact tie goes clockwise), and the move blocks until it
+completes so the software gets a real motion acknowledgment rather than a
+fire-and-forget.
+
+The design went through one full revision — the original chassis proved flawed
+in seam testing and was reprinted (see the Gantt chart below).
+
+<!-- TODO: add photos — original flawed print, revised chassis, assembled bin. -->
+<!-- TODO: 1-2 sentences on material, print settings, and bin dimensions. -->
+
+## Accomplishments
+
+### On-device classification
+The Linux side replicates the notebook's `eval_tf` preprocessing exactly —
+resize shorter side to ~293, center-crop 256, ImageNet mean/std — because
+preprocessing mismatch is the single most common cause of "works in Colab,
+fails on device." The model, labels, and thresholds are all read from the
+export directory, so swapping in a retrained model is a file copy.
+
+### Two-processor split
+On the UNO Q the STM32 is not a serial tty — it is reachable only over the
+Arduino **RouterBridge**, and that bridge is exposed only inside an Arduino App
+Lab app. So motor control lives in its own App (`deploy/motor_app/`, installed
+as `~/ArduinoApps/nema17`) that publishes an HTTP command port on `:8071`; the
+classifier POSTs a target bin to it and the App forwards a `Bridge.call("sort", bin)`
+to the MCU.
+
+### Plug-and-play autostart
+Installing a systemd service needs a sudo password the board doesn't grant, so
+autostart is two `@reboot` cron entries in the `arduino` user's crontab:
+`start_motor_app.sh` waits for docker and the App Lab daemon then starts the
+motor App, and `run_trashbin.sh` runs the camera loop in a self-restarting
+wrapper. If the motor App is down, sort calls are best-effort and never crash
+the classifier.
+
+### Confidence-gated clarification loop
+Raw softmax from a label-smoothed model is not a calibrated probability, so the
+notebook fits **temperature scaling** on the val set (T = 0.55) and sweeps
+thresholds, then re-measures the recommended threshold per TFLite variant. The
+selection rule: the lowest threshold whose auto-accepted predictions are ≥95%
+correct — maximizing coverage at that accuracy floor. Below threshold, the bin
+posts the frame and its top-k to the webapp, a human picks the right label, and
+the correction is pushed into the shared training set for the next retrain.
+
+### Web dashboard
+Live camera feed, current classification with a confidence bar, correct/wrong
+feedback buttons, and system status tiles (web server, board, camera, model).
+
+**Live at [ece180.duythe.dev](https://ece180.duythe.dev).**
+
+## Challenges & Solutions
+
+| System | Challenge | Solution |
+|--------|-----------|----------|
+| Chassis | Original design failed under load / seam testing | Full chassis revision and reprint before integration |
+| MCU access | STM32 is not exposed as a serial device on the UNO Q | Moved motor control into an Arduino App Lab app talking over RouterBridge RPC |
+| Autostart | systemd install requires a sudo password | Two `@reboot` crontab entries with self-restarting wrappers |
+| Python env | Board Python is externally managed, no venv available | `pip install --user --break-system-packages`, `PYTHONPATH` pointed at `~/.local` |
+| Quantization | int8 shifts logits, invalidating a single fixed threshold | Re-measured accuracy *and* threshold per exported variant |
+| Confidence | Label smoothing makes softmax overconfident | Temperature scaling fitted on val, threshold chosen by measured accept-accuracy |
+| <!-- TODO --> | <!-- TODO: motor wiring / stepper calibration issue --> | <!-- TODO --> |
+
+## Lessons Learned
+
+- Measure, don't assume — quantized accuracy, latency, and confidence thresholds all had to be re-measured per export variant rather than inherited from the fp32 model.
+- Preprocessing parity between training and deployment is worth more than any extra training trick.
+- Design the mechanism to be revised: the first chassis was wrong, and the schedule survived only because the reprint was planned into the timeline.
+- Platform research first — the RouterBridge/App Lab constraint on the UNO Q reshaped the whole software architecture and would have been much cheaper to discover early.
+- <!-- TODO: one team-process lesson, in your own words. -->
+
+## Next Steps
+
+- **ESP32 monitoring stream:** finish the separate ESP32-S3 camera for remote observation
+- **Federated learning:** aggregate corrections across deployed bins so every bin improves from every other bin's mistakes
+- **Higher-resolution / continuous feed:** sort a stream of items rather than one drop at a time
+- **Recover the int8 accuracy gap:** quantization-aware training, or fp16 on the Adreno 702 GPU delegate — at 27 ms per frame there is plenty of latency headroom to spend on a more accurate variant
+
+## Project Reconstruction
+
+### Hardware Requirements
+- Arduino UNO Q
+- USB webcam
+- NEMA-17 stepper + stepper driver (1/8 microstep)
+- Servo (optional second stage)
+- 3D-printed chassis — <!-- TODO: link STLs / CAD -->
+
+### Training
+
+1. Set the Colab runtime to **T4 GPU**.
+2. Add Colab Secrets: `GITHUB_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY`.
+3. Run `ECE180_Complete_Notebook.ipynb` top to bottom — **run the export cell (Cell 13) last**, since `litert-torch` pins torch versions and can disturb the training environment.
+
+The dataset downloads once via kagglehub into Google Drive; checkpoints and
+results persist there, and training is multi-session safe — if Colab
+disconnects, re-running resumes from the last epoch including EMA state.
+
+### Deployment
+
+1. Connect to the board over the standard UNO Q SSH login (`ssh arduino@uno-q.local`,
+   or the board's IP on the same network) and copy `deploy/` plus the exported
+   `.tflite` and `labels.txt` across with `scp`.
+2. Install host deps to the user site: `pip install --user --break-system-packages ai-edge-litert opencv-python-headless numpy pillow requests`.
+3. Install the motor App to `~/ArduinoApps/nema17` and `arduino-app-cli app start` it.
+4. Verify the stepper pins in `deploy/motor_app/sketch/sketch.ino` — **PUL=2 / DIR=3 / ENA=4**, common-anode active-LOW, 1600 steps/rev → 400 steps/bin.
+5. Add the two `@reboot` crontab entries (`start_motor_app.sh`, `run_trashbin.sh`).
+6. Set `MOTOR_ENABLED=1`, `MOTOR_URL=http://127.0.0.1:8071`, plus `TEMPERATURE` and `CONFIDENCE_THRESHOLD` for the shipped variant.
+
+Full technical detail, file-by-file, is in [`docs/TECHNICAL.md`](docs/TECHNICAL.md)
+and [`deploy/MOTOR_CONTROL_MAP.md`](deploy/MOTOR_CONTROL_MAP.md).
+
+### Troubleshooting Reference
+
+Common issues: sort RPCs acknowledge (`landed=N`) but the pole never turns —
+the sketch's pin constants don't match the driver wiring; the pole turns the
+wrong way — swap the `CW`/`CCW` constants; the pole over- or under-shoots a bin
+— rescale `STEPS_PER_REV` to the driver's DIP microstep setting; accuracy is
+far worse on device than in Colab — preprocessing mismatch; motor calls
+silently no-op — the App Lab app isn't running. After any sketch change:
+`arduino-app-cli app restart ~/ArduinoApps/nema17`.
+
+## Timeline
+
+<!-- TODO: embed the Gantt chart image from the progress report. -->
+
+| Task | Window (July 2026) |
+|------|--------------------|
+| Train Model | 12 – 18 |
+| Design and 3D Print Chassis | 12 – 13 |
+| Develop Webapp | 12 – 13 |
+| Testing Mechanical Design Control | 13 – 17 |
+| Improve Webapp | 18 – 23 |
+| Testing Camera Model with Chassis | 18 – 20 |
+| Chassis Revision | 20 – 22 |
+| Seam Tests | 22 – 26 |
+| Nice-to-have Implementation | 28 – Aug 2 |
+
+## Repository Structure
 
 ```
 .
 ├── ECE180_Complete_Notebook.ipynb   # Full pipeline: download → train → eval → export
-├── deploy/                          # UNO Q runtime (see On-Device Deployment below)
-│   ├── camera_loop.py               #   host: camera capture + classify + report + sort trigger
-│   ├── infer_uno_q.py               #   host: TFLite inference matching eval_tf preprocessing
-│   ├── bin_map.py                   #   host: label → bin index
-│   ├── motor_bridge.py              #   host: POSTs target bin to the motor App (:8071)
-│   ├── motor_cli.py                 #   laptop: manual motor control over ssh (standalone)
-│   ├── MOTOR_CONTROL_MAP.md         #   file map for the manual motor-control path
-│   ├── clarification_client.py      #   host: low-confidence → webapp clarification queue
-│   ├── edge_impulse_upload.py       #   reference: push corrected {image,label} to Edge Impulse
-│   ├── motor_app/                   #   Arduino App Lab app that owns the MCU (motors)
-│   │   ├── app.yaml                 #     app manifest (publishes command port 8071)
-│   │   ├── sketch/sketch.ino        #     MCU: stepper + servo, Bridge.provide("sort"/"step"/…)
-│   │   └── python/main.py           #     App: HTTP :8071 → Bridge.call(…)  (sort + manual)
-│   ├── run_trashbin.sh              #   boot: classifier self-restart loop (@reboot cron)
-│   ├── start_motor_app.sh           #   boot: waits for daemon, starts the motor App (@reboot cron)
-│   └── motor_control.ino            #   DEPRECATED standalone sketch (superseded by motor_app/)
-├── webapp/                          # dashboard/clarification service (deployed to the droplet)
-├── ESP32_mornitoring_camera/        # optional monitoring camera firmware (separate ESP32-S3 board)
+├── deploy/                          # UNO Q runtime (camera loop, inference, motor App)
+├── webapp/                          # dashboard + clarification service
+├── ESP32_mornitoring_camera/        # optional monitoring camera firmware
+├── exports/                         # ONNX model, labels.txt, quantization + calibration reports
 ├── results/                         # test_results.json, domain_shift.json, confusion_matrix.png
-└── README.md
+└── docs/TECHNICAL.md                # deep technical README
 ```
-
-Drive layout (created by the notebook):
-
-```
-MyDrive/ECE180_project/
-├── WasteDataset/      # 30 class dirs × {default, real_world}
-├── checkpoints/       # *_best.pt, *_resume.pt, progress.json
-├── results/           # metrics JSON + plots
-└── export/            # ONNX / TFLite models + labels.txt
-                       #   + quantization_report.json (per-variant acc, latency,
-                       #     recommended confidence threshold)
-                       #   + confidence_calibration.json (temperature + sweep)
-```
-
-## On-Device Deployment (UNO Q — plug-and-play)
-
-The runtime is split across the UNO Q's two processors, wired so the board comes
-up fully autonomous on power — no cable, no manual start.
-
-```
-                Linux MPU (Debian)                         STM32 MCU (Zephyr)
-  ┌──────────────────────────────────────────┐        ┌───────────────────────┐
-  │ camera_loop.py  (cron @reboot, self-loop) │        │ motor_app sketch.ino  │
-  │   USB webcam → classify → report dashboard│        │   Bridge.provide(     │
-  │   → motor_bridge.send_sort(bin)           │        │     "sort", …)        │
-  │        │  HTTP POST :8071/sort            │        │   stepper 2/3/4       │
-  │        ▼                                  │        └──────────▲────────────┘
-  │ motor_app python/main.py  (App Lab app)   │  RouterBridge RPC │
-  │   HTTP :8071 → Bridge.call("sort", bin) ──┼──(/run/arduino-router.sock)──┘
-  └──────────────────────────────────────────┘
-```
-
-**Why an App for the motors.** On the UNO Q the STM32 is *not* a serial tty — it
-is reachable only over the Arduino **RouterBridge** (RPC across an internal
-link), and that bridge is only exposed inside an **Arduino App Lab** app. So
-motor control lives in `deploy/motor_app/` (installed on the board as
-`~/ArduinoApps/nema17`, display name *"Trashbin Motor"*). `arduino-app-cli app
-start` compiles + flashes `sketch.ino` to the MCU and runs `python/main.py` in a
-container; the app publishes an HTTP command port (`8071`) to the host.
-
-**Rotation logic.** `sort(bin)` rotates the pole to the bin by the **shorter
-direction** (clockwise or counter-clockwise); on an exact tie it goes
-**clockwise**. The call blocks until the move finishes and returns the bin, so
-the HTTP response doubles as the motion ack.
-
-**Autostart (no root).** Installing a systemd service needs a sudo password, so
-plug-and-play is instead two `@reboot` entries in the `arduino` user's crontab:
-
-| Boot script | Role |
-|-------------|------|
-| `start_motor_app.sh` | waits for docker + the App Lab daemon, then `app start` the motor App |
-| `run_trashbin.sh`    | runs `camera_loop.py` in a self-restarting loop (relaunches on crash) |
-
-The classifier runs with `MOTOR_ENABLED=1` and `MOTOR_URL=http://127.0.0.1:8071`;
-if the motor App is down, sort calls are best-effort and never crash the loop.
-
-**Calibration knobs** (top of `deploy/motor_app/sketch/sketch.ino`): the stepper
-is on pins **PUL=2 / DIR=3 / ENA=4** (common-anode, active-LOW) at **1600
-steps/rev** (1/8 microstep → 400 steps/bin, 4 bins). These must match the
-driver's physical wiring — if they don't, sort RPCs still ack (`landed=N`) but
-no pulses reach the driver and the pole never turns. If the pole turns the wrong
-way, swap the `CW`/`CCW` constants; if it over/under-shoots a bin, rescale
-`STEPS_PER_REV` to the driver's DIP microstep setting. The servo arm and homing
-switch are left **off** until wired (`SERVO_ENABLED` / `HOMING_ENABLED`). After
-any change:
-`arduino-app-cli app restart ~/ArduinoApps/nema17`.
-
-### Manual motor control over SSH
-
-`deploy/motor_cli.py` drives both motors by hand from a laptop — standalone (it
-imports nothing else in `deploy/`), it just `ssh`es to the board and `curl`s the
-motor App. Full details in [`deploy/MOTOR_CONTROL_MAP.md`](deploy/MOTOR_CONTROL_MAP.md).
-
-The big stepper is addressed by **absolute pulse position, 0–1600** (one full
-revolution at the 1/8 microstep setting; bins sit at 0 / 400 / 800 / 1200), and
-the servo arm by **absolute angle, 0–180**:
-
-```bash
-export MOTOR_SSH=arduino@uno-q.local   # or --ssh; add --port 2222 --jump root@<droplet> for the tunnel
-python3 deploy/motor_cli.py step 800   # stepper -> pulse 800 (half turn, == bin 2)
-python3 deploy/motor_cli.py nudge -25  # stepper -> 25 pulses counter-clockwise
-python3 deploy/motor_cli.py servo 160  # arm -> 160 degrees
-python3 deploy/motor_cli.py pos        # read position, move nothing
-python3 deploy/motor_cli.py repl       # interactive: a bare 0-1600 is a position
-```
-
-Moves take the shorter way round and block until the motor stops, so the printed
-result is the position the MCU actually reached. `servo` reports the peripheral
-as disabled until `SERVO_ENABLED` is flipped in the sketch. This shares the
-`:8071` App with the classifier, so the App must be running.
-
-> **Python environment note:** the board's system Python is externally managed
-> with no venv (the `python3.13-venv` apt package needs a password). The host
-> classifier's deps (`ai-edge-litert`, `opencv-python-headless`, `numpy`,
-> `pillow`, `requests`) are installed to the **user site**
-> (`pip install --user --break-system-packages`), which is why `run_trashbin.sh`
-> uses `/usr/bin/python3` with `PYTHONPATH` pointed at `~/.local`. The motor App
-> gets its own environment from the App Lab runtime.
-
-## Deployment Notes (UNO Q)
-
-- The Linux-side inference code **must replicate the notebook's `eval_tf`
-  preprocessing exactly**: resize shorter side to ~293 → center-crop 256 →
-  ImageNet mean/std normalization. Preprocessing mismatch is the most common
-  cause of "works in Colab, fails on device."
-- Prefer the variant chosen from `export/quantization_report.json`: **dynamic-int8**
-  is usually within a fraction of a percent of fp32 and runs on XNNPACK CPU;
-  **static-int8** is fastest; fall back to **fp32 on the Adreno GPU delegate** if
-  int8 accuracy is unacceptable.
-- The static-int8 model is calibrated on `real_world` training images so its
-  quantization ranges match the live camera domain.
-- MobileNetV3-Large (~5.4M params) runs comfortably on the quad Cortex-A53 for a
-  non-real-time per-drop workload; the
-  export cell prints a CPU latency proxy (the A53 is ~2–4× slower than Colab CPU).
-
-## Confidence-Gated Clarification Loop
-
-Every classification carries a **temperature-scaled** softmax confidence score.
-Below `CONFIDENCE_THRESHOLD` (calibrated in the notebook; env-configured on the
-device, fallback 0.60), the device asks a human instead of guessing, and that
-correction feeds back into the shared model:
-
-```
-UNO Q (deploy/infer_uno_q.py)
-  classify frame -> (label, confidence)
-  confidence < CONFIDENCE_THRESHOLD?
-     -> deploy/clarification_client.py: POST frame + top-k to webapp,
-        queue locally if offline (retried via flush_pending())
-                    |
-                    v
-Webapp (separate repo/service) — notifies a human, they pick the right label,
-webapp persists the correction
-                    |
-                    v
-deploy/edge_impulse_upload.py — webapp backend calls this (or ports the
-pattern into its own stack) to push the corrected {image, label} into the
-shared Edge Impulse project's training data
-                    |
-                    v
-Next retrain/export cycle -> updated .tflite -> redeployed to every bin
-```
-
-`deploy/` implements the device side end-to-end (TFLite inference matching
-`eval_tf` preprocessing, thresholding, webhook client). The webapp and the
-Edge Impulse-triggered retrain/redeploy job are out of this repo's scope —
-`deploy/clarification_client.py`'s module docstring is the API contract the
-webapp must implement (`POST /api/clarifications`), and
-`deploy/edge_impulse_upload.py` is a reference the webapp backend can call
-once a human confirms a label.
-
-**Threshold calibration (measured, not guessed):** raw softmax from a
-label-smoothed model isn't a calibrated probability, so the notebook calibrates
-it. **Cell 12b** fits temperature scaling on the val set (argmax unchanged;
-confidence becomes ≈ P(correct)), sweeps thresholds, and saves
-`export/confidence_calibration.json`. **Cell 13** then re-measures the
-recommended threshold **per TFLite variant** (int8 shifts logits) into
-`quantization_report.json`. On the device, set both env vars for the variant
-you ship — `TEMPERATURE` and `CONFIDENCE_THRESHOLD` — which
-`deploy/infer_uno_q.py` reads; the defaults (T=1.0, 0.60) are only a fallback.
-The selection rule is: lowest threshold whose auto-accepted predictions are
-≥95% correct, which maximizes coverage (fewest human clarifications) at that
-accuracy floor.
