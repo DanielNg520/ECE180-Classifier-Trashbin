@@ -35,11 +35,18 @@
 // The servo arm is not wired yet, so the Servo library is compiled out to keep
 // the App Lab build self-contained. Flip SERVO_ENABLED to 1 once it is wired —
 // that is the only change needed; the include and the Servo object come with it.
-#define SERVO_ENABLED 0
+#define SERVO_ENABLED 1
 
 #if SERVO_ENABLED
 #include <Servo.h>
-static Servo arm;
+// Constructed in setup(), NOT as a static global. The zephyr backend's Servo
+// constructor calls initTimer(), which starts a Zephyr counter device; at
+// static-init time that device may not be ready yet, and the failure is silent
+// (initTimer returns 0, timer_is_started stays false, and every write() is a
+// no-op forever). Deferring construction to setup() runs it after the kernel
+// is up. `servoTimerOk` records whether the timer actually started.
+static Servo *arm = nullptr;
+static bool   servoTimerOk = false;
 #endif
 
 // ---- Stepper pins (match the physical wiring: PUL/DIR/ENA = 2/3/4) ----
@@ -55,7 +62,7 @@ const int PUL_RELEASE = HIGH;
 
 // ---- Optional peripherals (enable once physically wired) ----
 // SERVO_ENABLED is the #define above (it gates the Servo include too).
-const int  SERVO_PIN      = 9;   // clear of the stepper pins 2/3/4
+const int  SERVO_PIN      = 6;   // clear of stepper 2/3/4 and home switch 5
 const bool HOMING_ENABLED = false;
 const int  HOME_PIN       = 5;   // limit switch to GND, INPUT_PULLUP
 
@@ -66,7 +73,14 @@ const int  HOME_PIN       = 5;   // limit switch to GND, INPUT_PULLUP
 const int  NUM_BINS       = 4;
 const long STEPS_PER_REV  = 1600;
 const long STEPS_PER_BIN  = STEPS_PER_REV / NUM_BINS;   // 400 at 1/8 microstep
+// Cruise half-period once the ramp is up to speed (800 us => ~625 pulses/s).
 const int  PULSE_US       = 800;                         // matches bench timing
+// Starting (slowest) half-period, used for the first pulse of every move and
+// the last before stopping. Must be below the motor's pull-in rate — raise it
+// if moves still stall on startup, lower it if starts feel sluggish.
+const int  PULSE_START_US = 2500;                        // ~200 pulses/s
+// How many pulses the accel and decel ramps each take.
+const long RAMP_STEPS     = 120;
 
 // Direction levels on DIR_PIN. If the pole turns the WRONG way physically,
 // just swap these two values (one-line fix, no other logic changes).
@@ -92,18 +106,52 @@ long currentStep = 0;
 // Last angle commanded to the servo arm (meaningless while SERVO_ENABLED is 0).
 int currentAngle = ARM_REST;
 
-void stepPulse() {
+// Whether the stepper is energized (holding torque on). Released by the
+// "release" RPC so the pole can be hand-turned; any move re-energizes.
+bool motorHeld = true;
+
+// One pulse with an explicit half-period, in microseconds. The ramp in
+// rotate() varies this per step; PULSE_US remains the cruise (fastest) value.
+void stepPulseUs(int halfPeriodUs) {
   digitalWrite(PUL_PIN, PUL_ASSERT);
-  delayMicroseconds(PULSE_US);
+  delayMicroseconds(halfPeriodUs);
   digitalWrite(PUL_PIN, PUL_RELEASE);
-  delayMicroseconds(PULSE_US);
+  delayMicroseconds(halfPeriodUs);
 }
 
-// Rotate `steps` pulses in direction `dir` (CW/CCW level on DIR_PIN).
+void stepPulse() { stepPulseUs(PULSE_US); }
+
+// Rotate `steps` pulses in direction `dir` (CW/CCW level on DIR_PIN), with a
+// trapezoidal speed ramp: accelerate from PULSE_START_US to the PULSE_US
+// cruise rate over RAMP_STEPS, then decelerate symmetrically before stopping.
+//
+// Without this the motor was commanded straight from standstill to the full
+// 1/PULSE_US rate, which is above its pull-in torque: the rotor cannot stay in
+// sync with the field, giving rough/growly motion and — under load — an
+// outright stall (buzzing, no rotation). Ramping also crosses the motor's
+// low-speed resonance quickly instead of sitting in it.
+//
+// Short moves never reach cruise: the ramp index is clamped by distance to
+// whichever end is nearer, so a 10-pulse jog is simply slow throughout.
 void rotate(long steps, int dir) {
+  // Re-energize if we were released for hand-turning, and give the driver a
+  // moment to establish holding current before the first pulse.
+  if (!motorHeld) {
+    digitalWrite(ENA_PIN, ENA_ACTIVE);
+    motorHeld = true;
+    delay(50);
+  }
   digitalWrite(DIR_PIN, dir);
   delayMicroseconds(50);            // DIR setup time before first pulse
-  for (long i = 0; i < steps; i++) stepPulse();
+  for (long i = 0; i < steps; i++) {
+    long fromEnd = steps - 1 - i;
+    long ramp    = i < fromEnd ? i : fromEnd;   // steps into the nearer ramp
+    if (ramp > RAMP_STEPS) ramp = RAMP_STEPS;
+    // Linear interpolation: ramp==0 -> PULSE_START_US, ramp==RAMP_STEPS -> PULSE_US.
+    int halfPeriod = (int)(PULSE_START_US -
+                           ((long)(PULSE_START_US - PULSE_US) * ramp) / RAMP_STEPS);
+    stepPulseUs(halfPeriod);
+  }
 }
 
 // Non-negative modulo, for wrapping positions around the circle.
@@ -135,9 +183,10 @@ void gotoBin(long target) {
 // servo is compiled out.
 bool setArmAngle(int deg) {
 #if SERVO_ENABLED
+  if (arm == nullptr) return false;
   if (deg < 0) deg = 0;
   if (deg > 180) deg = 180;
-  arm.write(deg);
+  arm->write(deg);
   currentAngle = deg;
   return true;
 #else
@@ -225,6 +274,30 @@ int rpcPos(int) {
   return (int)currentStep;
 }
 
+// Declare wherever the pole is RIGHT NOW to be step 0 / bin 0, without moving.
+// This is the manual alternative to a homing switch: de-energize with
+// "release", hand-turn the pole to physical zero, then call this. Also used
+// after a reflash or App restart, which reset the MCU (and so currentStep)
+// while leaving the pole physically where it was.
+int rpcZero(int) {
+  currentStep = 0;
+  Monitor.println("zeroed at current position");
+  return 0;
+}
+
+// Energize (on != 0) or release (on == 0) the stepper. Released, the driver
+// stops holding and the pole can be turned by hand without fighting holding
+// torque or skipping steps. Any move re-energizes automatically.
+//
+// Position is NOT tracked while released — the whole point is that you move it
+// by hand — so currentStep is meaningless until you call "zero".
+int rpcRelease(int on) {
+  digitalWrite(ENA_PIN, on ? ENA_ACTIVE : !ENA_ACTIVE);
+  motorHeld = on != 0;
+  Monitor.println(motorHeld ? "stepper energized" : "stepper released (free to turn by hand)");
+  return motorHeld ? 1 : 0;
+}
+
 // Move the servo arm to absolute angle `deg` (0..180). Returns the angle, or
 // -1 if out of range / the servo is compiled out (SERVO_ENABLED == 0).
 int rpcServo(int deg) {
@@ -242,8 +315,13 @@ void setup() {
   digitalWrite(ENA_PIN, ENA_ACTIVE);
   if (HOMING_ENABLED) pinMode(HOME_PIN, INPUT_PULLUP);
 #if SERVO_ENABLED
-  arm.attach(SERVO_PIN);
-  arm.write(ARM_REST);
+  // Built here (not statically) so the zephyr counter device is ready — see
+  // the note at the Servo declaration. attached() tells us the timer handler
+  // actually took the servo, which is reported by the "servo" RPC.
+  arm = new Servo();
+  arm->attach(SERVO_PIN);
+  servoTimerOk = arm->attached();
+  arm->write(ARM_REST);
 #endif
 
   Bridge.begin();
@@ -258,6 +336,16 @@ void setup() {
   Bridge.provide("nudge", rpcNudge);
   Bridge.provide("pos", rpcPos);
   Bridge.provide("servo", rpcServo);
+  Bridge.provide("zero", rpcZero);
+  Bridge.provide("release", rpcRelease);
+
+#if SERVO_ENABLED
+  Monitor.print("servo: pin ");
+  Monitor.print(SERVO_PIN);
+  Monitor.println(servoTimerOk ? " attached (timer ok)" : " ATTACH FAILED (timer not started)");
+#else
+  Monitor.println("servo: compiled out");
+#endif
 
   Monitor.println("trashbin-motor ready");
 }

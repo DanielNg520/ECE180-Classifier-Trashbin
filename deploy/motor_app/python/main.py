@@ -79,6 +79,25 @@ def do_home():
     return _call("home", 0)
 
 
+def do_zero():
+    """Declare the pole's current physical position to be step 0 / bin 0.
+
+    The manual alternative to a homing switch: release, hand-turn to physical
+    zero, then zero. Also needed after a reflash/App restart, which resets the
+    MCU's counter while the pole stays put.
+    """
+    return _call("zero", 0)
+
+
+def do_release(on):
+    """Energize (on truthy) or release (on falsy) the stepper's holding torque.
+
+    Released, the pole turns freely by hand. Position is not tracked while
+    released, so follow a hand-turn with /zero.
+    """
+    return _call("release", 1 if int(on) else 0)
+
+
 def do_pos():
     return _call("pos", 0)
 
@@ -91,6 +110,8 @@ _POST_ROUTES = {
     "/nudge": ("delta", do_nudge),
     "/servo": ("angle", do_servo),
     "/home": (None, do_home),
+    "/zero": (None, do_zero),
+    "/release": ("on", do_release),
 }
 
 
