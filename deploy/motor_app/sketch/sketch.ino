@@ -191,6 +191,19 @@ void gotoStep(long target) {
   currentStep = target;
 }
 
+// Rotate to `target` in a FORCED direction, however far round that is. Used to
+// retrace a move: coming back the way we went keeps the pole from creeping the
+// same way turn after turn (which winds up anything routed along it), where
+// gotoStep() would happily take the short way and complete a full circle.
+void gotoStepVia(long target, int dir) {
+  target = wrapMod(target, STEPS_PER_REV);
+  long cwSteps = wrapMod(target - currentStep, STEPS_PER_REV);
+  long steps = (dir == CW) ? cwSteps : STEPS_PER_REV - cwSteps;
+  if (steps == 0 || steps == STEPS_PER_REV) return;
+  rotate(steps, dir);
+  currentStep = target;
+}
+
 // Bin index the pole is nearest to, derived from the absolute step position.
 long currentBinOf(long step) {
   return wrapMod((step + STEPS_PER_BIN / 2) / STEPS_PER_BIN, NUM_BINS);
@@ -254,9 +267,16 @@ int rpcSort(int bin) {
   // pole goes out to the bin, the arm sweeps the item off, then the pole
   // returns to its loading position ready for the next item.
   long origin = currentStep;
-  gotoBin(stop);
+  // Pick the outbound direction the same way gotoStep() would (shorter way,
+  // tie -> clockwise), then come home by the exact reverse of it rather than
+  // whichever way is shorter from the far side. Net rotation per sort is zero.
+  long target  = wrapMod(stop * STEPS_PER_BIN, STEPS_PER_REV);
+  long cwSteps = wrapMod(target - origin, STEPS_PER_REV);
+  int  outDir  = (cwSteps <= STEPS_PER_REV - cwSteps) ? CW : CCW;
+
+  gotoStepVia(target, outDir);
   sweepArm();
-  gotoStep(origin);
+  gotoStepVia(origin, outDir == CW ? CCW : CW);   // retrace, unwinding the trip
   Monitor.print("sorted -> bin ");
   Monitor.print(bin);
   Monitor.println(", returned to start");
