@@ -92,9 +92,31 @@ const int  CCW = LOW;
 const int  OFFSET = 0;
 
 // ---- Servo sweep angles (only used when SERVO_ENABLED) ----
-const int  ARM_REST   = 20;
-const int  ARM_SWEEP  = 160;
-const int  SWEEP_MS   = 500;
+// Bench-set 2026-07-30: the arm rests at 160 (its parked/home position) and
+// sweeps down to 0, i.e. 160 -> 0 -> 160. This pair is the only thing that sets
+// the sweep direction; there is no separate direction flag. Both ends were
+// driven by hand on the real linkage first to confirm neither one binds.
+const int  ARM_REST   = 160;
+const int  ARM_SWEEP  = 0;
+// How long the arm stays out at ARM_SWEEP before returning: the time the item
+// is actually being pushed off the platform. setArmAngle() already waits
+// SERVO_TRAVEL_MS for the arm to get there, so this is dwell, not travel.
+const int  SWEEP_MS   = 3000;
+
+// Pulse range handed to attach(). 1000..2000 us is the conservative standard
+// range, but on this MG996R it yielded only ~half the commanded travel (a
+// 180 deg command swept ~90 deg), so it is widened to the servo's own spec.
+// Verified 2026-07-30: full travel, no end-stop stall. If a future horn or
+// linkage binds before the ends, narrow this back rather than letting it push.
+const int  SERVO_MIN_US = 600;
+const int  SERVO_MAX_US = 2400;
+
+// An MG996R holding a stalled position overheats within seconds, so we do not
+// hold at all: drive to the angle, allow SERVO_TRAVEL_MS to get there, then
+// detach so no pulses are sent at rest. This is what pulling the signal wire
+// does by hand. The arm is unpowered between moves and back-drives freely --
+// fine for a sweep arm, but it will not hold against a load.
+const int  SERVO_TRAVEL_MS = 400;
 
 // ---- Homing ----
 const long HOME_MAX_STEPS = STEPS_PER_REV * 2;  // give up after 2 revs
@@ -186,8 +208,14 @@ bool setArmAngle(int deg) {
   if (arm == nullptr) return false;
   if (deg < 0) deg = 0;
   if (deg > 180) deg = 180;
+  // Re-attach for the move, then release: see SERVO_TRAVEL_MS. attach() is
+  // idempotent-ish but we only call it while detached, to keep the pulse train
+  // off except during travel.
+  if (!arm->attached()) arm->attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   arm->write(deg);
   currentAngle = deg;
+  delay(SERVO_TRAVEL_MS);
+  arm->detach();
   return true;
 #else
   (void)deg;
@@ -198,9 +226,8 @@ bool setArmAngle(int deg) {
 void sweepArm() {
 #if SERVO_ENABLED
   setArmAngle(ARM_SWEEP);
-  delay(SWEEP_MS);
-  setArmAngle(ARM_REST);
-  delay(SWEEP_MS);
+  delay(SWEEP_MS);          // dwell out, pushing the item clear
+  setArmAngle(ARM_REST);    // returns and releases; no dwell needed at rest
 #endif
 }
 
@@ -223,10 +250,16 @@ void homePole() {
 int rpcSort(int bin) {
   if (bin < 0 || bin >= NUM_BINS) return -1;
   long stop = ((bin + OFFSET) % NUM_BINS + NUM_BINS) % NUM_BINS;
+  // Remember where the platform started so it can come home afterwards: the
+  // pole goes out to the bin, the arm sweeps the item off, then the pole
+  // returns to its loading position ready for the next item.
+  long origin = currentStep;
   gotoBin(stop);
   sweepArm();
+  gotoStep(origin);
   Monitor.print("sorted -> bin ");
-  Monitor.println(bin);
+  Monitor.print(bin);
+  Monitor.println(", returned to start");
   return bin;
 }
 
@@ -319,9 +352,12 @@ void setup() {
   // the note at the Servo declaration. attached() tells us the timer handler
   // actually took the servo, which is reported by the "servo" RPC.
   arm = new Servo();
-  arm->attach(SERVO_PIN);
+  arm->attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
   servoTimerOk = arm->attached();
-  arm->write(ARM_REST);
+  // Park at rest, then release. Before this the sketch attached at boot and
+  // never detached, so a blocked or over-driven horn sat stalled at full
+  // current from power-on onward -- the overheat we chased.
+  setArmAngle(ARM_REST);
 #endif
 
   Bridge.begin();

@@ -82,11 +82,25 @@ way around the circle; an exact tie goes clockwise.
   - `POST /zero {}` — declares the current physical spot step 0 / bin 0.
   Do this after **reflashes and `app restart` too**, not just power-on: those
   reset the MCU counter while the pole stays physically put.
-  - Servo signal moved to **D6** (was D9). Reflashed on D6 2026-07-30 and the
-    RPC now returns the commanded angle (not `-1`), so the firmware is attaching
-    the pin; whether the horn physically turns is still unconfirmed —
-    wiring/power under investigation. Note `landed` echoes the commanded angle
-    and is never proof of motion.
+  - Servo signal is on **D6** (was D9). **Working as of 2026-07-30**, verified
+    on the bench. Three things were wrong at once:
+    - *Overheating.* The sketch attached at boot and never detached, so pulses
+      went out forever and a blocked or over-driven horn sat stalled at full
+      current until it cooked. `setArmAngle()` now attaches, writes, waits
+      `SERVO_TRAVEL_MS` (400 ms) for travel, then **detaches** — the arm is
+      unpowered at rest. (Pulling the signal wire by hand was the same fix.)
+      Consequence: the arm does not hold against a load between moves.
+    - *Half travel.* `attach()` used the library's default pulse range; the
+      horn swept ~half the commanded degrees. Range is now pinned to
+      `SERVO_MIN_US`/`SERVO_MAX_US` = **600..2400 us**, giving full travel.
+    - *Geometry.* Rest/sweep is **160 -> 0 -> 160** (`ARM_REST` 160 is the
+      parked position), dwelling `SWEEP_MS` = **3 s** out. Swapping that pair
+      is the only way to reverse the sweep; there is no direction flag.
+    Note `landed` still echoes the commanded angle and is never proof of motion.
+- **Sort returns the pole (2026-07-30).** `rpcSort()` records `currentStep`,
+  goes out to the bin, sweeps, then returns to that starting position, so the
+  platform is back at its loading spot for the next item. A full `sort` costs
+  ~11 s: travel out + 0.4 s arm + 3 s dwell + 0.4 s arm + travel back.
 - **Motion ramp (2026-07-30).** `rotate()` runs a trapezoidal profile:
   `PULSE_START_US` (2500) -> `PULSE_US` cruise (800) over `RAMP_STEPS` (120),
   decelerating symmetrically. Before this, moves started instantly at the full

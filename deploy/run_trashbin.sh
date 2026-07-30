@@ -11,7 +11,7 @@ export PYTHONPATH="$HOME/.local/lib/python3.13/site-packages:${PYTHONPATH:-}"
 
 export WEBAPP_URL="https://ece180.duythe.dev"
 export DEVICE_ID="trashbin-1"
-export CONFIDENCE_THRESHOLD="0.8"
+export CONFIDENCE_THRESHOLD="0.60"
 export TEMPERATURE="0.55"
 # Motors are driven through the "Trashbin Motor" Arduino App (App Lab), which
 # owns the RouterBridge link to the STM32 and publishes an HTTP port. The
