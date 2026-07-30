@@ -94,7 +94,8 @@ class DoSortTest(unittest.TestCase):
 
     def test_routes_cover_both_motors(self):
         self.assertEqual(
-            set(main._POST_ROUTES), {"/sort", "/step", "/nudge", "/servo", "/home"}
+            set(main._POST_ROUTES),
+            {"/sort", "/step", "/nudge", "/servo", "/home", "/zero", "/release"},
         )
 
     def test_serialized_by_lock(self):

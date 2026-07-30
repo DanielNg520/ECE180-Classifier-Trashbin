@@ -133,6 +133,29 @@ class ReplParsingTest(unittest.TestCase):
         self.assertIn("/pos", run.call_args[0][0][-1])          # the read-back
         self.assertIn("/home", run.call_args_list[0][0][0][-1])  # the move
 
+    def test_zero_declares_here_then_reads_back(self):
+        with mock.patch("subprocess.run", return_value=_ok(landed=0, step=0)) as run:
+            out = motor_cli._run_line("zero", self.conn)
+        self.assertIn("/zero", run.call_args_list[0][0][0][-1])
+        self.assertIn("/pos", run.call_args[0][0][-1])
+        self.assertIn("zeroed", out)
+
+    def test_bare_release_drops_torque(self):
+        # The common case is dropping torque, so a bare `release` must send 0 —
+        # sending 1 here would leave the pole fighting the hand-turn.
+        with mock.patch("subprocess.run", return_value=_ok()) as run:
+            out = motor_cli._run_line("release", self.conn)
+        remote = run.call_args[0][0][-1]
+        self.assertIn("/release", remote)
+        self.assertIn('{"on":0}', remote)
+        self.assertIn("by hand", out)
+
+    def test_release_1_re_energizes(self):
+        with mock.patch("subprocess.run", return_value=_ok()) as run:
+            out = motor_cli._run_line("release 1", self.conn)
+        self.assertIn('{"on":1}', run.call_args[0][0][-1])
+        self.assertIn("holding torque on", out)
+
     def test_gibberish_raises_value_error(self):
         with self.assertRaises(ValueError):
             motor_cli._run_line("wiggle it", {})

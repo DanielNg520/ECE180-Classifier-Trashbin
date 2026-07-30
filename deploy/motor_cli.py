@@ -186,6 +186,28 @@ def servo(angle, **kw):
     return _landed(call("/servo", {"angle": angle}, **kw), f"servo {angle}")
 
 
+def zero(**kw):
+    """Declare the pole's current physical spot to be step 0 / bin 0.
+
+    There is no homing switch, so this is what makes `home`'s claim true.
+    Needed after every power-on, reflash and App restart.
+    """
+    return _landed(call("/zero", {}, **kw), "zero")
+
+
+def release(on=0, **kw):
+    """Drop (on falsy) or re-assert (on truthy) the stepper's holding torque.
+
+    Released, the pole turns freely by hand; position is not tracked while
+    released, so follow a hand-turn with `zero`.
+    """
+    on = 1 if int(on) else 0
+    data = call("/release", {"on": on}, **kw)
+    if not data.get("ok"):
+        raise MotorError(f"release refused: {data.get('error', data)}")
+    return on
+
+
 def goto_bin(index, **kw):
     """Stepper -> bin `index` (0..3), i.e. pulse index*400."""
     index = int(index)
@@ -236,7 +258,7 @@ def _repl(conn):
     print(
         "Manual motor control. A bare number 0-1600 is an absolute stepper "
         "position;\n'+N'/'-N' jogs relative. Also: servo <0-180>, bin <0-3>, "
-        "sort <0-3>,\nhome, pos, health, q to quit."
+        "sort <0-3>,\nhome, zero, release [0|1], pos, health, q to quit."
     )
     try:
         print(f"at {describe(pos(**conn))}")
@@ -284,6 +306,13 @@ def _run_line(line, conn):
     if cmd == "home":
         home(**conn)
         return f"-> {describe(pos(**conn))}"
+    if cmd == "zero":
+        zero(**conn)
+        return f"-> zeroed here; {describe(pos(**conn))}"
+    if cmd == "release":
+        # Bare `release` drops torque — the common case; `release 1` re-holds.
+        on = release(arg if arg is not None else 0, **conn)
+        return "-> holding torque on" if on else "-> released; turn the pole by hand"
     if cmd == "pos":
         return f"at {describe(pos(**conn))}"
     if cmd == "health":
@@ -306,7 +335,10 @@ def main(argv=None):
         "command",
         nargs="?",
         default="repl",
-        choices=["repl", "step", "nudge", "servo", "bin", "sort", "home", "pos", "health"],
+        choices=[
+            "repl", "step", "nudge", "servo", "bin", "sort",
+            "home", "zero", "release", "pos", "health",
+        ],
         help="what to do",
     )
     p.add_argument("value", nargs="?", help="the number the command takes")

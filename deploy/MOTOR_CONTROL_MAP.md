@@ -33,6 +33,8 @@ motor_cli.py  ──ssh + curl──►  motor_app/python/main.py  ──Bridge.
 | `sort N` | `POST /sort {"bin":N}` | `sort` | stepper (+ arm sweep) | `0..3` |
 | `servo N` | `POST /servo {"angle":N}` | `servo` | servo arm | `0..180` degrees |
 | `home` | `POST /home` | `home` | stepper | — |
+| `zero` | `POST /zero {}` | `zero` | stepper | — |
+| `release [0\|1]` | `POST /release {"on":N}` | `release` | stepper | bare = drop torque |
 | `pos` | `GET /pos` | `pos` | stepper | read-only |
 | `health` | `GET /health` | — | — | liveness |
 
@@ -80,9 +82,11 @@ way around the circle; an exact tie goes clockwise.
   - `POST /zero {}` — declares the current physical spot step 0 / bin 0.
   Do this after **reflashes and `app restart` too**, not just power-on: those
   reset the MCU counter while the pole stays physically put.
-  - Servo signal moved to **D6** (was D9). As of this writing the servo still
-    does not physically move on either pin — wiring/power under investigation.
-    Note `landed` echoes the commanded angle and is never proof of motion.
+  - Servo signal moved to **D6** (was D9). Reflashed on D6 2026-07-30 and the
+    RPC now returns the commanded angle (not `-1`), so the firmware is attaching
+    the pin; whether the horn physically turns is still unconfirmed —
+    wiring/power under investigation. Note `landed` echoes the commanded angle
+    and is never proof of motion.
 - **Motion ramp (2026-07-30).** `rotate()` runs a trapezoidal profile:
   `PULSE_START_US` (2500) -> `PULSE_US` cruise (800) over `RAMP_STEPS` (120),
   decelerating symmetrically. Before this, moves started instantly at the full
