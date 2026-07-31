@@ -1,18 +1,24 @@
 .DS_Store
 __pycache__/
+
+# Model weights and datasets — too large for git; see exports/ for the
+# metadata (labels, calibration, quantization report) that IS tracked.
 *.pt
 *.onnx
+*.onnx.data
 *.tflite
 .kaggle/
-*.onnx.data
-*.md
-!README.md
-webapp/server.py
 
-# Bin-ary Sort web dashboard runtime files
+# Bin-ary Sort web dashboard runtime state (server.py itself IS tracked —
+# it is the deployed app, and keeping it out of git is how three divergent
+# copies ended up on the droplet).
 webapp/.venv/
 webapp/__pycache__/
 webapp/*.db
 webapp/clarification_images/
-webapp/server_backup.py
-webapp/server_before_v2.py
+
+# Scratch copies of exported metadata that duplicate exports/ byte-for-byte.
+# The rest of results/ (test_results.json, domain_shift.json) IS tracked.
+results/labels.txt
+results/confidence_calibration.json
+results/quantization_report.json

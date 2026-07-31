@@ -52,9 +52,11 @@ way around the circle; an exact tie goes clockwise.
 
 ## Notes
 
-- The servo arm is **enabled** (`#define SERVO_ENABLED 1`, 2026-07-30). Pin 9,
-  `ARM_REST=20` / `ARM_SWEEP=160`. Verified live: `POST /servo {"angle":20}`
-  returns `landed=20` (it returned `-1` while compiled out).
+- The servo arm is **enabled** (`#define SERVO_ENABLED 1`, 2026-07-30). Pin 6
+  (chosen to stay clear of stepper 2/3/4 and the home switch on 5),
+  `ARM_REST=160` / `ARM_SWEEP=0` — the arm parks at 160 and sweeps down to 0.
+  Verified live: `POST /servo {"angle":160}` returns `landed=160` (it returned
+  `-1` while compiled out).
   - Flipping that define is *not* sufficient on its own: `Servo.h` is not
     bundled with the `arduino:zephyr` core, so `sketch/sketch.yaml` must list
     `Servo (1.3.0)` under `libraries:` or the build dies with "Servo.h: No such

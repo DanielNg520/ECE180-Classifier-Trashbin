@@ -96,10 +96,10 @@ and it resumes from the last epoch (including EMA state), skipping completed mod
 │   │   └── python/main.py           #     App: HTTP :8071 → Bridge.call(…)  (sort + manual)
 │   ├── run_trashbin.sh              #   boot: classifier self-restart loop (@reboot cron)
 │   ├── start_motor_app.sh           #   boot: waits for daemon, starts the motor App (@reboot cron)
-│   └── motor_control.ino            #   DEPRECATED standalone sketch (superseded by motor_app/)
+│   ├── calibrate_round.sh           #   bench: sort into all four bins, check the pole returns to 0
+│   └── move_both.sh                 #   bench: jog stepper + sweep servo, then undo it
 ├── webapp/                          # dashboard/clarification service (deployed to the droplet)
-├── ESP32_mornitoring_camera/        # optional monitoring camera firmware (separate ESP32-S3 board)
-├── results/                         # test_results.json, domain_shift.json, confusion_matrix.png
+│   └── server.py                    #   Bin-ary Sort: FastAPI + SQLite, the deployed app
 └── README.md
 ```
 

@@ -22,19 +22,23 @@
  * bin moves are just steps at multiples of STEPS_PER_BIN, so manual jogging and
  * bin sorting can never disagree about where the pole is.
  *
- * Stepper wiring (from the known-good motor_control.ino bench setup — the
- * driver is a TB6600-class, common-anode / active-LOW board):
+ * Stepper wiring (bench-confirmed on this rig — the driver is a
+ * TB6600-class, common-anode / active-LOW board):
  *   PUL- = pin 2, DIR- = pin 3, ENA- = pin 4   (PUL+/DIR+/ENA+ tied to +5V).
  *   Driver DIP set to 1/8 microstep => 1600 pulses/rev.
- * Servo arm + homing switch are left OFF here because their wiring isn't
- * confirmed yet — flip SERVO_ENABLED / HOMING_ENABLED once they're wired.
+ * The servo arm is wired and ENABLED (pin 6). The homing switch is not wired,
+ * so HOMING_ENABLED stays false and homePole() just declares the current spot
+ * to be step 0 — flip it once a limit switch is on HOME_PIN.
  */
 
 #include <Arduino_RouterBridge.h>
 
-// The servo arm is not wired yet, so the Servo library is compiled out to keep
-// the App Lab build self-contained. Flip SERVO_ENABLED to 1 once it is wired —
-// that is the only change needed; the include and the Servo object come with it.
+// Gates the Servo include, the Servo object, and every arm movement. Set to 0
+// to build stepper-only (e.g. to bench the pole with the arm disconnected);
+// sweepArm() then reports success so a sort still completes.
+// NOTE: Servo.h is not bundled with the arduino:zephyr core — sketch.yaml must
+// list `Servo (1.3.0)` under `libraries:` or the build fails and the App is
+// left stopped.
 #define SERVO_ENABLED 1
 
 #if SERVO_ENABLED
@@ -56,7 +60,7 @@ const int ENA_PIN = 4;
 const int ENA_ACTIVE = LOW;   // common-anode: LOW = driver enabled / holding torque
 
 // Signals are active-LOW (common-anode wiring): a pulse asserts LOW then
-// releases HIGH, matching the known-good motor_control.ino.
+// releases HIGH, matching the bench-confirmed driver behaviour.
 const int PUL_ASSERT  = LOW;
 const int PUL_RELEASE = HIGH;
 
@@ -67,9 +71,9 @@ const bool HOMING_ENABLED = false;
 const int  HOME_PIN       = 5;   // limit switch to GND, INPUT_PULLUP
 
 // ---- Geometry ----
-// The driver DIP is set to 1/8 microstep => 1600 pulses per full revolution
-// (see motor_control.ino). Four bins around the circle => 90 deg / 400 pulses
-// each. If you change the DIP microstep setting, rescale STEPS_PER_REV.
+// The driver DIP is set to 1/8 microstep => 1600 pulses per full revolution.
+// Four bins around the circle => 90 deg / 400 pulses each. If you change the
+// DIP microstep setting, rescale STEPS_PER_REV.
 const int  NUM_BINS       = 4;
 const long STEPS_PER_REV  = 1600;
 const long STEPS_PER_BIN  = STEPS_PER_REV / NUM_BINS;   // 400 at 1/8 microstep
@@ -118,6 +122,10 @@ const int  SERVO_MAX_US = 2400;
 // fine for a sweep arm, but it will not hold against a load.
 const int  SERVO_TRAVEL_MS = 400;
 
+// Settle time between a failed attach() and the retry, to let the zephyr timer
+// actually release before we ask for it again.
+const int  SERVO_RETRY_MS  = 50;
+
 // ---- Homing ----
 const long HOME_MAX_STEPS = STEPS_PER_REV * 2;  // give up after 2 revs
 
@@ -163,8 +171,34 @@ void rotate(long steps, int dir) {
     motorHeld = true;
     delay(50);
   }
+  // Re-assert the pin modes every move. The servo's attach()/detach() on
+  // SERVO_PIN reconfigures a zephyr timer, and that was leaving DIR_PIN no
+  // longer driven as a GPIO output: digitalWrite() below became a no-op, DIR
+  // stayed stuck at its previous level, and every move AFTER a sweep turned
+  // the same way -- so a sort went out to the bin and then kept going instead
+  // of retracing. Cheap to redo, and it makes the direction independent of
+  // whatever the servo did to the pin muxing.
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(PUL_PIN, OUTPUT);
+  pinMode(ENA_PIN, OUTPUT);
+  // pinMode(OUTPUT) leaves the pin driven LOW, and PUL_ASSERT is LOW, so PUL
+  // comes out of the reconfigure already asserted: the first
+  // digitalWrite(PUL_ASSERT) in the loop below would be a no-op and every move
+  // would silently lose its first pulse. Release it explicitly.
+  digitalWrite(PUL_PIN, PUL_RELEASE);
+  delay(2);                         // let the reconfigured pins settle
+  // The TB6600's DIR input is opto-isolated and latches on the TRANSITION, not
+  // the level -- see the boot-time priming in setup(). pinMode() above left DIR
+  // LOW, which is also CCW, so writing the target level alone gave CW an edge
+  // on every move and CCW none at all: CCW moves simply did not turn. Drive the
+  // opposite level first so both directions always produce a real edge.
+  digitalWrite(DIR_PIN, dir == CW ? CCW : CW);
+  delay(2);
   digitalWrite(DIR_PIN, dir);
-  delayMicroseconds(50);            // DIR setup time before first pulse
+  // DIR setup before the first pulse. The datasheet wants ~5 us, but the opto
+  // was missing changes at 50 us. 2 ms costs nothing next to a move measured in
+  // hundreds of milliseconds.
+  delay(2);
   for (long i = 0; i < steps; i++) {
     long fromEnd = steps - 1 - i;
     long ramp    = i < fromEnd ? i : fromEnd;   // steps into the nearer ramp
@@ -221,10 +255,22 @@ bool setArmAngle(int deg) {
   if (arm == nullptr) return false;
   if (deg < 0) deg = 0;
   if (deg > 180) deg = 180;
-  // Re-attach for the move, then release: see SERVO_TRAVEL_MS. attach() is
-  // idempotent-ish but we only call it while detached, to keep the pulse train
-  // off except during travel.
-  if (!arm->attached()) arm->attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+  // Re-attach for the move, then release again: see SERVO_TRAVEL_MS. The
+  // zephyr backend's attach() does NOT always take -- when the timer fails to
+  // restart, write() goes nowhere and the arm silently does not move. Verify
+  // it, and retry once, or the caller is told a sweep happened that did not.
+  if (!arm->attached()) {
+    arm->attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+    if (!arm->attached()) {
+      arm->detach();
+      delay(SERVO_RETRY_MS);
+      arm->attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+    }
+  }
+  if (!arm->attached()) {
+    Monitor.println("servo: ATTACH FAILED, arm did not move");
+    return false;
+  }
   arm->write(deg);
   currentAngle = deg;
   delay(SERVO_TRAVEL_MS);
@@ -236,11 +282,21 @@ bool setArmAngle(int deg) {
 #endif
 }
 
-void sweepArm() {
+// Returns false if the arm did not complete its sweep, so the caller can pass
+// that up the RPC -- Monitor output does not reach the board's app log, so a
+// printed warning would be invisible to anyone driving this remotely.
+bool sweepArm() {
 #if SERVO_ENABLED
-  setArmAngle(ARM_SWEEP);
-  delay(SWEEP_MS);          // dwell out, pushing the item clear
-  setArmAngle(ARM_REST);    // returns and releases; no dwell needed at rest
+  // Report whether the arm actually swept: a sort that silently skipped the
+  // sweep leaves the item sitting on the platform, which looks identical to a
+  // successful sort from the outside.
+  bool out = setArmAngle(ARM_SWEEP);
+  delay(SWEEP_MS);              // dwell out, pushing the item clear
+  bool back = setArmAngle(ARM_REST);  // returns and releases; no dwell at rest
+  if (!out || !back) Monitor.println("servo: SWEEP INCOMPLETE");
+  return out && back;
+#else
+  return true;   // servo compiled out: nothing to sweep, not a failure
 #endif
 }
 
@@ -275,8 +331,12 @@ int rpcSort(int bin) {
   int  outDir  = (cwSteps <= STEPS_PER_REV - cwSteps) ? CW : CCW;
 
   gotoStepVia(target, outDir);
-  sweepArm();
+  bool swept = sweepArm();
   gotoStepVia(origin, outDir == CW ? CCW : CW);   // retrace, unwinding the trip
+  // Come home either way -- leaving the pole parked at the bin on a failed
+  // sweep would strand it -- but report the failure, or a sort that left the
+  // item sitting on the platform is indistinguishable from a good one.
+  if (!swept) return -1;
   Monitor.print("sorted -> bin ");
   Monitor.print(bin);
   Monitor.println(", returned to start");
@@ -366,6 +426,23 @@ void setup() {
   pinMode(DIR_PIN, OUTPUT);
   pinMode(ENA_PIN, OUTPUT);
   digitalWrite(ENA_PIN, ENA_ACTIVE);
+  // Prime DIR by driving it both ways before any move. The TB6600's DIR input
+  // is opto-isolated, and the very FIRST level change after boot was being
+  // lost: the first move went out correctly, the first move that should have
+  // come back went the same way instead, and every direction change after that
+  // was fine. Toggling here means a real move is never the first transition.
+  digitalWrite(DIR_PIN, CCW);
+  delay(20);
+  digitalWrite(DIR_PIN, CW);
+  delay(20);
+  // Toggling the level alone did not clear it, so exercise the whole path --
+  // direction change plus real pulses -- a few steps each way. Net movement is
+  // zero, and whatever was swallowing the first direction change is spent here
+  // instead of on the first real return leg.
+  rotate(8, CCW);
+  delay(100);
+  rotate(8, CW);
+  delay(100);
   if (HOMING_ENABLED) pinMode(HOME_PIN, INPUT_PULLUP);
 #if SERVO_ENABLED
   // Built here (not statically) so the zephyr counter device is ready — see

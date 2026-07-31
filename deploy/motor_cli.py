@@ -40,11 +40,16 @@ to hunt for bin alignment):
     motor> q
 
 Where to ssh (in precedence order): --ssh, then $MOTOR_SSH, else the default
-below. If you reach the board through the droplet's reverse tunnel (see
-setup_board_services.sh), that is:
+below.
 
-    export MOTOR_SSH="arduino@localhost"
-    export MOTOR_SSH_PORT=2222
+The board is normally reached over **Tailscale** (`arduino@100.119.45.76`),
+which is the default here: it works from any network without port-forwarding or
+exposing sshd publicly, and the link is WireGuard-encrypted and
+device-authenticated. Plain ssh to the board on the same LAN works just as well
+when Tailscale is down — nothing in this CLI depends on Tailscale itself:
+
+    export MOTOR_SSH="arduino@uno-q.local"          # same-LAN fallback
+    export MOTOR_SSH_PORT=22
     export MOTOR_SSH_JUMP="root@your.droplet.ip"    # ProxyJump, optional
 
 Exit status is 0 only when the board acknowledged the move.

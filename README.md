@@ -46,7 +46,6 @@ retrain.
 - Second motor (servo arm) added to the mechanism late in the schedule
 
 ### Stretch Goals
-- ESP32-S3 monitoring camera stream — *in progress*
 - Federated learning across bins for a network effect — *in progress*
 - Higher-throughput continuous-feed sorting rather than one item at a time
 
@@ -59,7 +58,6 @@ retrain.
 | USB webcam | Item capture at the drop chute |
 | NEMA-17 stepper + driver | Rotates the sorting pole to the target bin |
 | Servo arm | Second-stage actuation (added late; `SERVO_ENABLED` gate) |
-| ESP32-S3 + camera | Optional monitoring stream (stretch) |
 
 ## Model & Dataset
 
@@ -166,8 +164,9 @@ posts the frame and its top-k to the webapp, a human picks the right label, and
 the correction is pushed into the shared training set for the next retrain.
 
 ### Web dashboard
-Live camera feed, current classification with a confidence bar, correct/wrong
-feedback buttons, and system status tiles (web server, board, camera, model).
+Recent classifications with confidence bars, a review queue for low-confidence
+frames with correct/wrong feedback buttons, and system status tiles (web server,
+board, model).
 
 **Live at [ece180.duythe.dev](https://ece180.duythe.dev).**
 
@@ -193,7 +192,6 @@ feedback buttons, and system status tiles (web server, board, camera, model).
 
 ## Next Steps
 
-- **ESP32 monitoring stream:** finish the separate ESP32-S3 camera for remote observation
 - **Federated learning:** aggregate corrections across deployed bins so every bin improves from every other bin's mistakes
 - **Higher-resolution / continuous feed:** sort a stream of items rather than one drop at a time
 - **Recover the int8 accuracy gap:** quantization-aware training, or fp16 on the Adreno 702 GPU delegate — at 27 ms per frame there is plenty of latency headroom to spend on a more accurate variant
@@ -264,7 +262,6 @@ silently no-op — the App Lab app isn't running. After any sketch change:
 ├── ECE180_Complete_Notebook.ipynb   # Full pipeline: download → train → eval → export
 ├── deploy/                          # UNO Q runtime (camera loop, inference, motor App)
 ├── webapp/                          # dashboard + clarification service
-├── ESP32_mornitoring_camera/        # optional monitoring camera firmware
 ├── exports/                         # ONNX model, labels.txt, quantization + calibration reports
 ├── results/                         # test_results.json, domain_shift.json, confusion_matrix.png
 └── docs/TECHNICAL.md                # deep technical README
