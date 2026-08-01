@@ -87,7 +87,6 @@ and it resumes from the last epoch (including EMA state), skipping completed mod
 │   ├── bin_map.py                   #   host: label → bin index
 │   ├── motor_bridge.py              #   host: POSTs target bin to the motor App (:8071)
 │   ├── motor_cli.py                 #   laptop: manual motor control over ssh (standalone)
-│   ├── MOTOR_CONTROL_MAP.md         #   file map for the manual motor-control path
 │   ├── clarification_client.py      #   host: low-confidence → webapp clarification queue
 │   ├── edge_impulse_upload.py       #   reference: push corrected {image,label} to Edge Impulse
 │   ├── motor_app/                   #   Arduino App Lab app that owns the MCU (motors)
@@ -173,7 +172,7 @@ any change:
 
 `deploy/motor_cli.py` drives both motors by hand from a laptop — standalone (it
 imports nothing else in `deploy/`), it just `ssh`es to the board and `curl`s the
-motor App. Full details in [`deploy/MOTOR_CONTROL_MAP.md`](deploy/MOTOR_CONTROL_MAP.md).
+motor App. Full details in [`docs/MOTOR_CONTROL.md`](docs/MOTOR_CONTROL.md).
 
 The big stepper is addressed by **absolute pulse position, 0–1600** (one full
 revolution at the 1/8 microstep setting; bins sit at 0 / 400 / 800 / 1200), and
