@@ -41,13 +41,14 @@ retrain.
 - MobileNetV3-Large fine-tuned to **89.1% test accuracy / 0.890 macro-F1** across 30 classes
 - Exported to ONNX + three TFLite variants with **measured** per-variant accuracy, size, and latency
 - Full on-device pipeline: camera → classify → bin index → stepper move, autostarted at boot
-- **4-category sorting** through the rotating-pole chassis
+- **2-category sorting** through the single-axis rotating-pole chassis — later extended to 4 (see Stretch Goals)
 - Web dashboard with correct/wrong human feedback (reinforced-learning loop)
 - Second motor (servo arm) added to the mechanism late in the schedule
 
 ### Stretch Goals
-- Federated learning across bins for a network effect — *in progress*
-- Higher-throughput continuous-feed sorting rather than one item at a time
+- **4-category sorting** through the 2-axis double-motored rotating system — *Done*
+- Federated learning across bins for a network effect — *Done*
+- Higher-throughput continuous-feed sorting rather than one item at a time — *in progress*
 
 ## System Hardware
 
